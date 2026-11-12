@@ -1,3 +1,8 @@
 data/audit.log.jsonl
 *.jsonl
 data/events/
+
+# Build output
+gateway-ui/bin/
+gateway-ui/obj/
+*.exe

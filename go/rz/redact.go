@@ -14,8 +14,12 @@ const (
 	EmailKeep = 2
 )
 
+// minMaskablePhoneLen is the shortest phone that can show its 3-char prefix and
+// 2-char suffix while still hiding something; anything shorter is fully masked.
+const minMaskablePhoneLen = 8
+
 func maskPhone(phone string) string {
-	if len(phone) <= PhoneLen {
+	if len(phone) < minMaskablePhoneLen {
 		return "••••"
 	}
 	return phone[:3] + "••••" + phone[len(phone)-2:]
@@ -23,8 +27,12 @@ func maskPhone(phone string) string {
 
 func maskEmail(email string) string {
 	at := indexOf(email, '@')
-	if at <= 0 {
-		return "•••@" + email[at+1:]
+	if at < 0 {
+		// Not an email shape: there is no domain to keep, so reveal nothing.
+		return "•••"
+	}
+	if at == 0 {
+		return "•••@" + email[1:]
 	}
 	local := email[:at]
 	domain := email[at+1:]
@@ -40,13 +48,13 @@ func maskName(name string) string {
 		return "•••"
 	}
 	parts := splitWords(name)
-	if len(parts) <= 1 {
-		return name
+	if len(parts) == 0 {
+		return "•••"
 	}
+	// Every word is masked to its first character — including a single-word
+	// name, which would otherwise be returned in full.
 	for i := range parts {
-		if len(parts[i]) > 0 {
-			parts[i] = string(parts[i][0]) + "•••"
-		}
+		parts[i] = maskWord(parts[i])
 	}
 	out := ""
 	for i, p := range parts {
@@ -56,6 +64,14 @@ func maskName(name string) string {
 		out += p
 	}
 	return out
+}
+
+// maskWord keeps the first character (rune-safe) and masks the rest.
+func maskWord(word string) string {
+	for _, r := range word {
+		return string(r) + "•••"
+	}
+	return "•••"
 }
 
 // RedactPII returns a copy of record with the given PII fields masked.

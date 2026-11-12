@@ -61,6 +61,12 @@ func ComputeMetrics(log []AuditEntry) Metrics {
 		if e.RuleFired == RuleDuplicateSuppress {
 			continue
 		}
+		// Forwarded gateway payment events share the log (and the chain) but are
+		// not recovery activity: a verified test payment must not count as a
+		// "recovered" event or dilute cost-per-recovery.
+		if e.Flow == FlowPaymentEvent {
+			continue
+		}
 		fm := byFlow[e.Flow]
 		if !seen[e.EventID] {
 			fm.Events++

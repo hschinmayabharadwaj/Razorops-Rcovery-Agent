@@ -9,6 +9,9 @@ import (
 	"sync"
 )
 
+// maxAuditLineBytes is the largest single JSONL audit line the reader accepts.
+const maxAuditLineBytes = 1 << 20
+
 // AuditStore is an append-only structured JSON audit log (JSONL).
 // Every entry from every actor/decision lands here.
 //
@@ -164,6 +167,9 @@ func readAllEntries(file string) ([]AuditEntry, error) {
 	defer f.Close()
 	var out []AuditEntry
 	sc := bufio.NewScanner(f)
+	// The default 64 KB token limit would make the whole log unreadable after a
+	// single long entry; allow lines up to maxAuditLineBytes.
+	sc.Buffer(make([]byte, 0, 64*1024), maxAuditLineBytes)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {

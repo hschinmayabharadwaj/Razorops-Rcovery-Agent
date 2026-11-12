@@ -84,12 +84,15 @@ func LoadTunablesFile(path string) (TunableConfig, error) {
 			return tunables, fmt.Errorf("config %s: unknown or locked key %q", path, k)
 		}
 	}
+	// Validate every key into a private copy first; the live tunables are only
+	// replaced once the whole file is known to be good (all-or-nothing).
+	next := tunables
 	for k, v := range m {
-		if err := applyTunableKey(k, v); err != nil {
+		if err := applyTunableKey(&next, k, v); err != nil {
 			return tunables, fmt.Errorf("config %s: %w", path, err)
 		}
 	}
-	return tunables, nil
+	return SetTunables(next), nil
 }
 
 func isTunableKey(k string) bool {
@@ -101,7 +104,9 @@ func isTunableKey(k string) bool {
 	return false
 }
 
-func applyTunableKey(k string, v json.RawMessage) error {
+// applyTunableKey validates one key/value and writes it into t (a caller-owned
+// copy); it never touches the live tunables.
+func applyTunableKey(t *TunableConfig, k string, v json.RawMessage) error {
 	var iVal int
 	var i64Val int64
 	switch k {
@@ -123,25 +128,23 @@ func applyTunableKey(k string, v json.RawMessage) error {
 	default:
 		return fmt.Errorf("unknown tunable key %q", k)
 	}
-	SetTunableField(func(t *TunableConfig) {
-		switch k {
-		case "max_retry_attempts":
-			t.MaxRetryAttempts = iVal
-		case "max_touches_cap":
-			t.MaxTouchesPerCustomer = iVal
-		case "checkout_reminder_cap":
-			t.CheckoutReminderCap = iVal
-		case "voice_call_cap":
-			t.MaxVoiceCalls = iVal
-		case "mandate_retry_window":
-			t.MandateWindowDays = iVal
-		case "receivable_tier2":
-			t.ReceivableTier2Days = iVal
-		case "cart_incentive_threshold":
-			t.CartIncentiveThreshold = i64Val
-		case "ptp_supervisor_threshold":
-			t.PtpSupervisorThreshold = i64Val
-		}
-	})
+	switch k {
+	case "max_retry_attempts":
+		t.MaxRetryAttempts = iVal
+	case "max_touches_cap":
+		t.MaxTouchesPerCustomer = iVal
+	case "checkout_reminder_cap":
+		t.CheckoutReminderCap = iVal
+	case "voice_call_cap":
+		t.MaxVoiceCalls = iVal
+	case "mandate_retry_window":
+		t.MandateWindowDays = iVal
+	case "receivable_tier2":
+		t.ReceivableTier2Days = iVal
+	case "cart_incentive_threshold":
+		t.CartIncentiveThreshold = i64Val
+	case "ptp_supervisor_threshold":
+		t.PtpSupervisorThreshold = i64Val
+	}
 	return nil
 }
