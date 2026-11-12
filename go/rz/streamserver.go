@@ -101,6 +101,23 @@ func StartStreamServer(audit *AuditStore, hub *StreamHub, addr string) (*http.Se
 		s.events = evts
 	}
 
+	srv := &http.Server{Addr: addr, Handler: s.handler(), ReadHeaderTimeout: readHeaderTimeout}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintln(os.Stderr, "stream-server: serve:", err)
+		}
+	}()
+	return srv, nil
+}
+
+// handler builds the full route table wrapped in CORS. It is separate from
+// StartStreamServer so tests can serve the exact production handler without
+// binding a real port.
+func (s *streamServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/events", s.handleEvents)
 	mux.HandleFunc("/chain-status", s.handleChainStatus)
@@ -112,18 +129,7 @@ func StartStreamServer(audit *AuditStore, hub *StreamHub, addr string) (*http.Se
 	mux.HandleFunc("/demo/tamper", s.handleTamper)
 	mux.HandleFunc("/payment-event", s.handlePaymentEvent)
 	mux.HandleFunc("/admin/action", s.handleAdminAction)
-
-	srv := &http.Server{Addr: addr, Handler: withCORS(mux), ReadHeaderTimeout: readHeaderTimeout}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			fmt.Fprintln(os.Stderr, "stream-server: serve:", err)
-		}
-	}()
-	return srv, nil
+	return withCORS(mux)
 }
 
 // handleEvents is the Server-Sent Events endpoint.

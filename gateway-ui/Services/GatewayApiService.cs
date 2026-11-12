@@ -54,9 +54,12 @@ public interface IGatewayApi
 public class GatewayApiService : IGatewayApi
 {
     public static readonly string[] Roles = { "admin", "operator", "auditor" };
+    // Demo credential for the Go adapter's admin role (see go/rz/auth.go).
+    public const string AdminDemoKey = "admin_key_demo";
+
     private static readonly Dictionary<string, string> RoleKeys = new()
     {
-        ["admin"] = "admin_key_demo",
+        ["admin"] = AdminDemoKey,
         ["operator"] = "op_key_demo",
         ["auditor"] = "audit_key_demo",
     };

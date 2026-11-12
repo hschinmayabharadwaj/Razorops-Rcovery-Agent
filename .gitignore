@@ -3,6 +3,10 @@ data/audit.log.jsonl
 data/events/
 
 # Build output
-gateway-ui/bin/
-gateway-ui/obj/
+bin/
+obj/
 *.exe
+
+# Test results / coverage
+TestResults/
+coverage.out

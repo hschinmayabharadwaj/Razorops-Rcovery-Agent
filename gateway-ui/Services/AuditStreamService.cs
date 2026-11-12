@@ -211,7 +211,7 @@ public class AuditStreamService : IHostedService
         }
     }
 
-    private static StreamEvent? ParseEvent(string json)
+    internal static StreamEvent? ParseEvent(string json)
     {
         try
         {

@@ -54,6 +54,30 @@ deterministic engine whose stopping decisions and every audit entry are provable
 measured, and hash-chained, not self-reported. The naive-vs-real comparison and
 live tamper demo below make that the story a judge can see in under a minute.
 
+## Repository layout
+
+```
+razor_gateway/
+  go/                         # Recovery engine (Go module razor_gateway/go)
+    cmd/                      #   one CLI per stage + stream-server (HTTP/SSE adapter)
+    rz/                       #   engine package: rules, state machine, audit chain, HTTP adapter
+      *_test.go               #   unit tests, fuzz targets
+      integration_test.go     #   end-to-end: real batch -> real audit log -> real HTTP handler
+    data/flows/               #   canonical 60-event batch
+  gateway-ui/                 # Blazor Server dashboard + Razorpay test checkout (.NET 10)
+    Components/               #   pages, layout, shared components
+    Endpoints/                #   minimal-API route mapping (PaymentEndpoints)
+    Services/                 #   RazorpayPaymentService, PaymentAuditService, Go API + SSE clients
+    Models/                   #   DTOs mirroring the Go adapter's JSON
+  tests/
+    GatewayUI.Tests/          # xUnit tests for gateway-ui
+      Unit/                   #   services in isolation (stubbed HTTP, temp audit file)
+      Integration/            #   the real app in-memory via WebApplicationFactory
+      TestSupport/            #   shared fakes: stub HTTP, test secrets, temp files
+  .github/workflows/ci.yml    # build + vet + test for both stacks on every push / PR
+  RazorGateway.slnx           # .NET solution (app + tests)
+```
+
 ## End-to-end flow
 
 Every box maps to real code in this repo (file = `go/rz/*.go`):
@@ -146,7 +170,9 @@ go/
     metrics.go        # metrics computed FROM the audit log
     table.go          # audit-log table + metrics view
     runner.go         # unified orchestrator (idempotency gate + per-customer touch caps)
-  rz/*_test.go        # 11 test files: 86 tests + 5 fuzz targets (see Testing section)
+  rz/*_test.go        # 14 test files: 113 tests + 5 fuzz targets (see Testing section)
+  rz/integration_test.go # batch -> audit log -> HTTP handler, over a real loopback connection
+  rz/hardening_test.go   # admin-override guard, redaction edge cases, atomic tunables, log limits
   rz/fuzz_test.go     # native Go fuzz targets: classify / parse / verify / redact / LLM
   rz/contract_test.go # golden contracts: Razorpay payloads, error-code table, HMAC KAT, redaction
   rz/idempotency_test.go # at-most-once gate: replay suppress + concurrent delivery race test
@@ -463,8 +489,33 @@ cd go
 export PATH="$HOME/go-toolchain/go/bin:$PATH"   # adjust to your Go install
 go build ./...
 go vet ./...
-go test ./rz/                     # 11 test files: 86 tests + 5 fuzz seed-corpora
+go test ./rz/                     # 14 test files: 113 tests + 5 fuzz seed-corpora
+go test -run Integration ./rz/    # only the HTTP integration tests
+go test -cover ./rz/              # statement coverage
 ```
+
+Blazor UI (from the repository root):
+
+```bash
+dotnet build RazorGateway.slnx
+dotnet test  RazorGateway.slnx                                   # 74 tests: unit + integration
+dotnet test  RazorGateway.slnx --filter "FullyQualifiedName~Unit"
+dotnet test  RazorGateway.slnx --filter "FullyQualifiedName~Integration"
+```
+
+## Testing
+
+| Suite | Where | What it proves |
+|-------|-------|----------------|
+| Go unit | `go/rz/*_test.go` | every named rule, the state machine, hash chain, anchor, redaction, config loader, idempotency |
+| Go fuzz | `go/rz/fuzz_test.go` | classify / parse / verify / redact / LLM validation never panic on hostile input |
+| Go integration | `go/rz/integration_test.go` | the canonical batch is run into a real audit log and served by the production HTTP handler: auth on every route, role matrix, metrics match the log, redacted exceptions, SSE replay + live push, tamper demo, admin overrides refused by locked rules |
+| C# unit | `tests/GatewayUI.Tests/Unit` | order validation, payment + webhook signature checks, webhook idempotency, payment audit hash chain (restart, tamper, concurrency), Go API client error mapping, SSE client de-duplication |
+| C# integration | `tests/GatewayUI.Tests/Integration` | the real app in-memory: order / verify / webhook status codes, 1 MB webhook limit, rate limiting, audit file stays a valid chain |
+
+The C# tests never touch the network or real credentials: outbound HTTP is a
+stub, secrets are fixed fake values, and audit files live in a temp directory.
+CI (`.github/workflows/ci.yml`) runs both stacks, with the Go race detector on.
 
 Native fuzzing (each target also runs its seeds during the normal `go test`
 above; extend with `-fuzztime`):

@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go engine (build, vet, test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Unit + integration tests (race detector, coverage)
+        run: go test -race -cover ./...
+
+  dotnet:
+    name: Blazor UI (build, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore
+        run: dotnet restore RazorGateway.slnx
+      - name: Build
+        run: dotnet build RazorGateway.slnx --no-restore --configuration Release
+      - name: Unit + integration tests
+        run: dotnet test RazorGateway.slnx --no-build --configuration Release --collect "XPlat Code Coverage"
