@@ -145,6 +145,8 @@
     protected override void OnInitialized()
     {
         Stream.StatusChanged += OnStatus;
+        // StatusChanged only fires on a transition; show the current state now.
+        OnStatus(Stream.CurrentStatus);
         _subId = Stream.Subscribe(OnStreamEvent);
     }
 

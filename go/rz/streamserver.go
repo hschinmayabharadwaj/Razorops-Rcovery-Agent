@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -88,7 +89,17 @@ type streamServer struct {
 	hub       *StreamHub
 	mode      ExecutionMode
 	events    []*FlowEvent
+	workDir   string // scratch dir for compare / sandbox audit logs
 	computeMu sync.Mutex
+}
+
+// scratchPath resolves a scratch audit-log name under the server's work dir.
+func (s *streamServer) scratchPath(name string) string {
+	dir := s.workDir
+	if dir == "" {
+		dir = DefaultWorkDir
+	}
+	return filepath.Join(dir, name)
 }
 
 // StartStreamServer binds an HTTP server on addr (e.g. ":8090") and serves in a
@@ -96,10 +107,32 @@ type streamServer struct {
 // caller; the caller is responsible for keeping the process alive. Events are
 // loaded on demand from data/flows for the compute-heavy endpoints.
 func StartStreamServer(audit *AuditStore, hub *StreamHub, addr string) (*http.Server, error) {
-	s := &streamServer{audit: audit, hub: hub, mode: ModeSandbox}
-	if evts, err := LoadEvents("data/flows"); err == nil {
-		s.events = evts
+	opts := StreamServerOptions{WorkDir: DefaultWorkDir}
+	if evts, err := LoadEvents(filepath.Join(DefaultWorkDir, "flows")); err == nil {
+		opts.Events = evts
 	}
+	return StartStreamServerWithOptions(audit, hub, addr, opts)
+}
+
+// StreamServerOptions configures the inputs of the compute endpoints.
+type StreamServerOptions struct {
+	// Events is the batch the compare / prescore / sandbox / admin endpoints
+	// re-evaluate. Nil disables those endpoints (they answer 500).
+	Events []*FlowEvent
+	// WorkDir is where /compare-policy and /sandbox write their scratch audit
+	// logs. Empty means DefaultWorkDir.
+	WorkDir string
+}
+
+// StartStreamServerWithOptions is StartStreamServer with an explicit event
+// batch and scratch directory, so the server does not depend on the process
+// working directory.
+func StartStreamServerWithOptions(audit *AuditStore, hub *StreamHub, addr string, opts StreamServerOptions) (*http.Server, error) {
+	workDir := opts.WorkDir
+	if workDir == "" {
+		workDir = DefaultWorkDir
+	}
+	s := &streamServer{audit: audit, hub: hub, mode: ModeSandbox, events: opts.Events, workDir: workDir}
 
 	srv := &http.Server{Addr: addr, Handler: s.handler(), ReadHeaderTimeout: readHeaderTimeout}
 	ln, err := net.Listen("tcp", addr)
@@ -253,12 +286,12 @@ func (s *streamServer) handleComparePolicy(w http.ResponseWriter, r *http.Reques
 	}
 	s.computeMu.Lock()
 	defer s.computeMu.Unlock()
-	realAudit, err := NewAuditStore("data/audit.real.jsonl")
+	realAudit, err := NewAuditStore(s.scratchPath("audit.real.jsonl"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "", "")
 		return
 	}
-	naiveAudit, err := NewAuditStore("data/audit.naive.jsonl")
+	naiveAudit, err := NewAuditStore(s.scratchPath("audit.naive.jsonl"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "", "")
 		return
@@ -320,7 +353,7 @@ func (s *streamServer) handleSandbox(w http.ResponseWriter, r *http.Request) {
 	s.computeMu.Lock()
 	defer s.computeMu.Unlock()
 	selected := r.URL.Query().Get("scenario")
-	report, err := RunSandbox(s.events, BatchNow())
+	report, err := RunSandboxIn(s.events, BatchNow(), s.scratchPath(""))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "", "")
 		return
@@ -558,7 +591,12 @@ func (s *streamServer) handleAdminAction(w http.ResponseWriter, r *http.Request)
 
 	switch req.Action {
 	case "nudge_retry":
-		if latest.State == AgentRecovered {
+		if locked {
+			// Name the locked rule itself, so the refusal shows WHICH
+			// compliance invariant held rather than a generic state.
+			refusal = "locked rule " + string(lockedRule) + " blocks retry"
+			refusalRule = string(lockedRule)
+		} else if latest.State == AgentRecovered {
 			refusal = "event already recovered"
 			refusalRule = "already_recovered"
 		} else if latest.State == AgentSuppressed {

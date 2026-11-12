@@ -74,6 +74,7 @@ razor_gateway/
       Unit/                   #   services in isolation (stubbed HTTP, temp audit file)
       Integration/            #   the real app in-memory via WebApplicationFactory
       TestSupport/            #   shared fakes: stub HTTP, test secrets, temp files
+    GatewayUI.E2E/            # Playwright browser tests: Go server + app + real browser (opt-in)
   .github/workflows/ci.yml    # build + vet + test for both stacks on every push / PR
   RazorGateway.slnx           # .NET solution (app + tests)
 ```
@@ -170,7 +171,7 @@ go/
     metrics.go        # metrics computed FROM the audit log
     table.go          # audit-log table + metrics view
     runner.go         # unified orchestrator (idempotency gate + per-customer touch caps)
-  rz/*_test.go        # 14 test files: 113 tests + 5 fuzz targets (see Testing section)
+  rz/*_test.go        # 14 test files: 118 tests + 5 fuzz targets (see Testing section)
   rz/integration_test.go # batch -> audit log -> HTTP handler, over a real loopback connection
   rz/hardening_test.go   # admin-override guard, redaction edge cases, atomic tunables, log limits
   rz/fuzz_test.go     # native Go fuzz targets: classify / parse / verify / redact / LLM
@@ -489,7 +490,7 @@ cd go
 export PATH="$HOME/go-toolchain/go/bin:$PATH"   # adjust to your Go install
 go build ./...
 go vet ./...
-go test ./rz/                     # 14 test files: 113 tests + 5 fuzz seed-corpora
+go test ./rz/                     # 14 test files: 118 tests + 5 fuzz seed-corpora
 go test -run Integration ./rz/    # only the HTTP integration tests
 go test -cover ./rz/              # statement coverage
 ```
@@ -498,10 +499,22 @@ Blazor UI (from the repository root):
 
 ```bash
 dotnet build RazorGateway.slnx
-dotnet test  RazorGateway.slnx                                   # 74 tests: unit + integration
+dotnet test  RazorGateway.slnx                                   # 74 unit + integration tests (browser tests skipped)
 dotnet test  RazorGateway.slnx --filter "FullyQualifiedName~Unit"
 dotnet test  RazorGateway.slnx --filter "FullyQualifiedName~Integration"
 ```
+
+Browser end-to-end tests are opt-in because they start the Go server, the
+Blazor app and a real browser (needs Go on the PATH and Chrome or Edge):
+
+```powershell
+$env:RUN_E2E = "1"
+dotnet test .\tests\GatewayUI.E2E\GatewayUI.E2E.csproj           # 10 browser tests
+```
+
+Set `E2E_BROWSER_CHANNEL` to `chrome`, `msedge` or `chromium` to pin a browser
+(`chromium` uses Playwright's own build: run
+`pwsh tests/GatewayUI.E2E/bin/Debug/net10.0/playwright.ps1 install chromium` once).
 
 ## Testing
 
@@ -512,10 +525,13 @@ dotnet test  RazorGateway.slnx --filter "FullyQualifiedName~Integration"
 | Go integration | `go/rz/integration_test.go` | the canonical batch is run into a real audit log and served by the production HTTP handler: auth on every route, role matrix, metrics match the log, redacted exceptions, SSE replay + live push, tamper demo, admin overrides refused by locked rules |
 | C# unit | `tests/GatewayUI.Tests/Unit` | order validation, payment + webhook signature checks, webhook idempotency, payment audit hash chain (restart, tamper, concurrency), Go API client error mapping, SSE client de-duplication |
 | C# integration | `tests/GatewayUI.Tests/Integration` | the real app in-memory: order / verify / webhook status codes, 1 MB webhook limit, rate limiting, audit file stays a valid chain |
+| Browser E2E | `tests/GatewayUI.E2E` | the whole system in a real browser: overview metrics from the Go engine, live audit stream, tamper demo flips the chain badge, an admin retry on a fraud event is refused by `fraud_suppress`, exceptions are redacted, every page loads its data |
 
-The C# tests never touch the network or real credentials: outbound HTTP is a
-stub, secrets are fixed fake values, and audit files live in a temp directory.
-CI (`.github/workflows/ci.yml`) runs both stacks, with the Go race detector on.
+The C# unit and integration tests never touch the network or real credentials:
+outbound HTTP is a stub, secrets are fixed fake values, and audit files live in
+a temp directory. The browser tests run the real Go server and app, but write
+only to a temp directory. CI (`.github/workflows/ci.yml`) runs all three
+layers, with the Go race detector on.
 
 Native fuzzing (each target also runs its seeds during the normal `go test`
 above; extend with `-fuzztime`):
@@ -549,7 +565,14 @@ go run ./cmd/prescore      # prevention layer: predict-before-fail report
 go run ./cmd/sandbox       # tunable sweep, locked rules invariant
 go run ./cmd/security      # security posture demo (webhook/auth/redaction/anchor/LLM/secrets)
 go run ./cmd/demo          # batch walkthroughs (mandate_revoked, NPCI window, checkout incentive)
+go run ./cmd/stream-server -seed   # HTTP/SSE adapter for the dashboard on :8090; -seed runs the batch if the log is empty
+go run ./cmd/stream-server -port 9000 -audit /var/rz/audit.jsonl -flows data/flows -workdir /var/rz/work
 ```
+
+`stream-server` flags: `-port` (or the `PORT` env var), `-audit` (log file to
+serve), `-flows` (event directory), `-workdir` (scratch directory for the
+compare-policy / sandbox logs) and `-seed`. None of them depend on the process
+working directory.
 
 ## Demo output
 
@@ -559,8 +582,11 @@ go run ./cmd/demo          # batch walkthroughs (mandate_revoked, NPCI window, c
 - per-flow breakdown,
 - full exception list (escalated / abandoned / waiting) with reasons and rule fired,
 - an LLM exception summary for a human reviewer, and
-- a hash-chain verification (`✓ chain verified: 188 entries, no tampering detected`).
+- a hash-chain verification (`✓ chain verified: 190 entries, no tampering detected`).
 
-Measured parity with the original TypeScript run is exact: 188 audit entries,
-₹851208.52 recovered of ₹1384523.97 at risk (61.5%), 32 recovered, 81 touches,
-65 naive-policy compliance violations.
+Measured results: 190 audit entries, ₹851208.52 recovered of ₹1384523.97 at
+risk (61.5%), 32 recovered, 81 touches. The recovery figures match the original
+TypeScript run exactly. The log is 2 entries longer than the TypeScript run's
+188 because the high-value promise-to-pay supervisor rule (`ptp_missed_escalate`
+via `PtpNeedsSupervisor`) now actually receives the event amount and escalates
+one PTP for human sign-off instead of suppressing it.

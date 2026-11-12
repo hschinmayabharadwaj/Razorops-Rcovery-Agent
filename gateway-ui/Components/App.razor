@@ -11,11 +11,11 @@
     <link rel="stylesheet" href="@Assets["GatewayUI.styles.css"]" />
     <ImportMap />
     <link rel="icon" type="image/png" href="favicon.png" />
-    <HeadOutlet />
+    <HeadOutlet @rendermode="PageRenderMode" />
 </head>
 
 <body>
-    <Routes />
+    <Routes @rendermode="PageRenderMode" />
     <ReconnectModal />
     <script src="@Assets["_framework/blazor.web.js"]"></script>
     <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
@@ -24,3 +24,15 @@
 </body>
 
 </html>
+
+@code {
+    [CascadingParameter]
+    private HttpContext HttpContext { get; set; } = default!;
+
+    // Every page is interactive (Blazor Server circuit): without a render mode
+    // the pages are static HTML, so buttons, live stream updates and JS interop
+    // silently do nothing. Pages that must stay static (e.g. the error page)
+    // can opt out with [ExcludeFromInteractiveRouting].
+    private IComponentRenderMode? PageRenderMode =>
+        HttpContext.AcceptsInteractiveRouting() ? InteractiveServer : null;
+}

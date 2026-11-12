@@ -198,6 +198,54 @@ func TestLoadTunablesFileIsAllOrNothing(t *testing.T) {
 	}
 }
 
+// ptpContext is a committed promise-to-pay whose date is still in the future.
+func ptpContext(amount int64) *RecoveryContext {
+	now := BatchNow()
+	ptpDate := now + 5*24*3600*1000
+	return &RecoveryContext{
+		EventID: "evt_ptp", Flow: FlowPromiseToPay, CustomerID: "cust_ptp", Amount: amount,
+		Currency: "INR", Reason: ReasonPtpCommitted, Now: now, ActivePromiseToPayDate: &ptpDate,
+	}
+}
+
+func TestStepStateEscalatesHighValuePtpForSupervisorSignOff(t *testing.T) {
+	defer ResetTunables()
+	ResetTunables()
+	threshold := GetTunables().PtpSupervisorThreshold
+
+	atThreshold, err := StepState(ptpContext(threshold))
+	if err != nil {
+		t.Fatal(err)
+	}
+	belowThreshold, err := StepState(ptpContext(threshold - 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if atThreshold.Next.Decision != DecisionEscalate || atThreshold.Next.RuleFired != RulePtpMissedEscalate {
+		t.Fatalf("PTP at the supervisor threshold was not escalated: %+v", atThreshold.Next)
+	}
+	if belowThreshold.Next.Decision != DecisionSuppress || belowThreshold.Next.RuleFired != RulePtpSuppress {
+		t.Fatalf("PTP below the threshold should be suppressed until its date: %+v", belowThreshold.Next)
+	}
+}
+
+func TestStepStateSupervisorThresholdIsTunable(t *testing.T) {
+	defer ResetTunables()
+	ResetTunables()
+	amount := GetTunables().PtpSupervisorThreshold
+	SetTunableField(func(tc *TunableConfig) { tc.PtpSupervisorThreshold = amount + 1 })
+
+	step, err := StepState(ptpContext(amount))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if step.Next.Decision == DecisionEscalate {
+		t.Fatalf("raising the threshold above the amount should stop the escalation: %+v", step.Next)
+	}
+}
+
 func TestMetricsIgnoreForwardedPaymentEvents(t *testing.T) {
 	recovered := baseEntry(nil)
 	recovered.State = AgentRecovered

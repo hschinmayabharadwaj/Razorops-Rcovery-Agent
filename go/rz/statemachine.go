@@ -38,6 +38,9 @@ func StepState(ctx *RecoveryContext) (StepResult, error) {
 		CartValue:              ctx.CartValue,
 		Visits:                 ctx.Visits,
 		RollingSuccessRate:     ctx.RollingSuccessRate,
+		// Amount drives PtpNeedsSupervisor: without it the dual-control rule
+		// for high-value promise-to-pay events can never fire.
+		Amount: ctx.Amount,
 	}
 
 	d := DecideForFlow(ctx.Flow, input)

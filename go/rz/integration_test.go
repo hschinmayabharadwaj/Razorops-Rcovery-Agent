@@ -45,7 +45,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	hub := NewStreamHub()
 	previousHub := BroadcastHub
 	BroadcastHub = hub
-	s := &streamServer{audit: store, hub: hub, mode: ModeSandbox, events: events}
+	s := &streamServer{audit: store, hub: hub, mode: ModeSandbox, events: events, workDir: t.TempDir()}
 	server := httptest.NewServer(s.handler())
 	t.Cleanup(func() {
 		server.Close()
@@ -214,6 +214,101 @@ func TestIntegrationPrescoreCoversEveryEvent(t *testing.T) {
 	}
 	if got.Headline == "" {
 		t.Fatal("prescore headline missing")
+	}
+}
+
+func TestIntegrationComparePolicyReportsNaiveViolations(t *testing.T) {
+	env := newIntegrationEnv(t)
+	mainLogBefore := len(env.log(t))
+
+	var got comparisonJSON
+	env.getJSON(t, "/compare-policy", operatorKey, &got)
+
+	if got.Violations.Total == 0 || got.Violations.FraudRetries == 0 || got.Violations.MandateRetries == 0 {
+		t.Fatalf("naive policy should commit fraud + mandate violations: %+v", got.Violations)
+	}
+	if got.Naive.TouchesSent <= got.Real.TouchesSent {
+		t.Fatalf("naive touches (%d) should exceed real touches (%d)", got.Naive.TouchesSent, got.Real.TouchesSent)
+	}
+	if got.TotalNaiveTouches < got.Violations.Total {
+		t.Fatalf("violations (%d) exceed naive touches (%d)", got.Violations.Total, got.TotalNaiveTouches)
+	}
+	// The real-policy side of the comparison is the same engine as the main log.
+	if want := ComputeMetrics(env.log(t)); got.Real.RecoveredCount != want.RecoveredCount || got.Real.TouchesSent != want.TouchesSent {
+		t.Fatalf("comparison real metrics drifted from the main log: got %+v, want %+v", got.Real, want)
+	}
+	if got.Takeaway == "" {
+		t.Fatal("takeaway missing")
+	}
+	// The comparison runs in scratch logs; the served audit log is untouched.
+	if after := len(env.log(t)); after != mainLogBefore {
+		t.Fatalf("compare-policy appended %d entries to the main audit log", after-mainLogBefore)
+	}
+}
+
+func TestIntegrationSandboxSweepKeepsLockedRulesAtZero(t *testing.T) {
+	env := newIntegrationEnv(t)
+	mainLogBefore := len(env.log(t))
+
+	var got sandboxJSON
+	env.getJSON(t, "/sandbox?scenario=aggressive", adminKey, &got)
+
+	if !got.LockedInvariant {
+		t.Fatal("locked invariant reported broken")
+	}
+	if got.SelectedScenario != "aggressive" {
+		t.Fatalf("selectedScenario = %q, want aggressive", got.SelectedScenario)
+	}
+	rates := map[string]float64{}
+	for _, sc := range got.Scenarios {
+		rates[sc.Label] = sc.RecoveryRate
+		if sc.LockedViolations.Total != 0 {
+			t.Fatalf("scenario %s has %d locked-rule violations", sc.Label, sc.LockedViolations.Total)
+		}
+	}
+	for _, label := range []string{"baseline", "aggressive", "conservative", "high_incentive"} {
+		if _, ok := rates[label]; !ok {
+			t.Fatalf("scenario %q missing from sweep: %v", label, rates)
+		}
+	}
+	if rates["conservative"] >= rates["aggressive"] {
+		t.Fatalf("tunables did not move recovery: conservative %.3f >= aggressive %.3f", rates["conservative"], rates["aggressive"])
+	}
+	if len(got.LockedRules) != len(LockedRuleIds) {
+		t.Fatalf("lockedRules = %v, want %d rules", got.LockedRules, len(LockedRuleIds))
+	}
+	// The sweep must restore default tunables and leave the served log alone.
+	if GetTunables() != DefaultTunables() {
+		t.Fatalf("sandbox sweep leaked tunables: %+v", GetTunables())
+	}
+	if after := len(env.log(t)); after != mainLogBefore {
+		t.Fatalf("sandbox appended %d entries to the main audit log", after-mainLogBefore)
+	}
+}
+
+func TestIntegrationComputeEndpointsFailClosedWithoutEvents(t *testing.T) {
+	store, err := NewAuditStore(filepath.Join(t.TempDir(), "audit.log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &streamServer{audit: store, hub: NewStreamHub(), mode: ModeSandbox, workDir: t.TempDir()}
+	server := httptest.NewServer(s.handler())
+	defer server.Close()
+
+	for _, path := range []string{"/compare-policy", "/prescore", "/sandbox"} {
+		req, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-API-Key", adminKey)
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Errorf("%s without events: status %d, want 500", path, resp.StatusCode)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@
     <Project Path="gateway-ui/GatewayUI.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/GatewayUI.E2E/GatewayUI.E2E.csproj" />
     <Project Path="tests/GatewayUI.Tests/GatewayUI.Tests.csproj" />
   </Folder>
 </Solution>
