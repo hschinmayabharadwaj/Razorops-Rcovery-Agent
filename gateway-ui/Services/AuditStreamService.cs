@@ -23,6 +23,8 @@ public class AuditStreamService : IHostedService
     private readonly Dictionary<long, Action<StreamEvent>> _subscribers = new();
     private long _nextId;
     private readonly List<StreamEvent> _buffer = new();
+    private const int MaxSeenHashes = 100_000;
+    private readonly HashSet<string> _seenHashes = new(StringComparer.Ordinal);
 
     public string BaseUrl => _api.BaseUrl;
 
@@ -87,6 +89,20 @@ public class AuditStreamService : IHostedService
         Action<StreamEvent>[] snap;
         lock (_gate)
         {
+            // The Go server replays the full history on every (re)connect. Each
+            // audit entry's chain hash is unique, so skip rows already published
+            // instead of showing every row again after a reconnect.
+            if (ev is AuditStreamEvent { Entry.Hash: { Length: > 0 } hash })
+            {
+                if (_seenHashes.Count >= MaxSeenHashes)
+                {
+                    _seenHashes.Clear();
+                }
+                if (!_seenHashes.Add(hash))
+                {
+                    return;
+                }
+            }
             _buffer.Add(ev);
             while (_buffer.Count > MaxBuffered)
             {
@@ -195,7 +211,7 @@ public class AuditStreamService : IHostedService
         }
     }
 
-    private static StreamEvent? ParseEvent(string json)
+    internal static StreamEvent? ParseEvent(string json)
     {
         try
         {

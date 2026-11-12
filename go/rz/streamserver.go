@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -72,12 +73,33 @@ func withCORS(next http.Handler) http.Handler {
 // ComparePolicies, ComputePrescoreReport, RunSandbox, VerifyChain). It only
 // shapes those results into JSON and applies the deny-by-default role gate.
 
+// Size bounds for a forwarded payment event (see handlePaymentEvent).
+const (
+	maxPaymentEventIDBytes   = 128
+	maxPaymentEventTypeBytes = 64
+	maxPaymentDetailsBytes   = 2048
+)
+
+// readHeaderTimeout bounds how long a client may take to send request headers
+// (slow-loris guard). No write timeout is set: /events is a long-lived stream.
+const readHeaderTimeout = 10 * time.Second
+
 type streamServer struct {
 	audit     *AuditStore
 	hub       *StreamHub
 	mode      ExecutionMode
 	events    []*FlowEvent
+	workDir   string // scratch dir for compare / sandbox audit logs
 	computeMu sync.Mutex
+}
+
+// scratchPath resolves a scratch audit-log name under the server's work dir.
+func (s *streamServer) scratchPath(name string) string {
+	dir := s.workDir
+	if dir == "" {
+		dir = DefaultWorkDir
+	}
+	return filepath.Join(dir, name)
 }
 
 // StartStreamServer binds an HTTP server on addr (e.g. ":8090") and serves in a
@@ -85,11 +107,50 @@ type streamServer struct {
 // caller; the caller is responsible for keeping the process alive. Events are
 // loaded on demand from data/flows for the compute-heavy endpoints.
 func StartStreamServer(audit *AuditStore, hub *StreamHub, addr string) (*http.Server, error) {
-	s := &streamServer{audit: audit, hub: hub, mode: ModeSandbox}
-	if evts, err := LoadEvents("data/flows"); err == nil {
-		s.events = evts
+	opts := StreamServerOptions{WorkDir: DefaultWorkDir}
+	if evts, err := LoadEvents(filepath.Join(DefaultWorkDir, "flows")); err == nil {
+		opts.Events = evts
 	}
+	return StartStreamServerWithOptions(audit, hub, addr, opts)
+}
 
+// StreamServerOptions configures the inputs of the compute endpoints.
+type StreamServerOptions struct {
+	// Events is the batch the compare / prescore / sandbox / admin endpoints
+	// re-evaluate. Nil disables those endpoints (they answer 500).
+	Events []*FlowEvent
+	// WorkDir is where /compare-policy and /sandbox write their scratch audit
+	// logs. Empty means DefaultWorkDir.
+	WorkDir string
+}
+
+// StartStreamServerWithOptions is StartStreamServer with an explicit event
+// batch and scratch directory, so the server does not depend on the process
+// working directory.
+func StartStreamServerWithOptions(audit *AuditStore, hub *StreamHub, addr string, opts StreamServerOptions) (*http.Server, error) {
+	workDir := opts.WorkDir
+	if workDir == "" {
+		workDir = DefaultWorkDir
+	}
+	s := &streamServer{audit: audit, hub: hub, mode: ModeSandbox, events: opts.Events, workDir: workDir}
+
+	srv := &http.Server{Addr: addr, Handler: s.handler(), ReadHeaderTimeout: readHeaderTimeout}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintln(os.Stderr, "stream-server: serve:", err)
+		}
+	}()
+	return srv, nil
+}
+
+// handler builds the full route table wrapped in CORS. It is separate from
+// StartStreamServer so tests can serve the exact production handler without
+// binding a real port.
+func (s *streamServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/events", s.handleEvents)
 	mux.HandleFunc("/chain-status", s.handleChainStatus)
@@ -101,16 +162,7 @@ func StartStreamServer(audit *AuditStore, hub *StreamHub, addr string) (*http.Se
 	mux.HandleFunc("/demo/tamper", s.handleTamper)
 	mux.HandleFunc("/payment-event", s.handlePaymentEvent)
 	mux.HandleFunc("/admin/action", s.handleAdminAction)
-
-	srv := &http.Server{Addr: addr, Handler: withCORS(mux)}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		_ = srv.Serve(ln)
-	}()
-	return srv, nil
+	return withCORS(mux)
 }
 
 // handleEvents is the Server-Sent Events endpoint.
@@ -234,12 +286,12 @@ func (s *streamServer) handleComparePolicy(w http.ResponseWriter, r *http.Reques
 	}
 	s.computeMu.Lock()
 	defer s.computeMu.Unlock()
-	realAudit, err := NewAuditStore("data/audit.real.jsonl")
+	realAudit, err := NewAuditStore(s.scratchPath("audit.real.jsonl"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "", "")
 		return
 	}
-	naiveAudit, err := NewAuditStore("data/audit.naive.jsonl")
+	naiveAudit, err := NewAuditStore(s.scratchPath("audit.naive.jsonl"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "", "")
 		return
@@ -301,7 +353,7 @@ func (s *streamServer) handleSandbox(w http.ResponseWriter, r *http.Request) {
 	s.computeMu.Lock()
 	defer s.computeMu.Unlock()
 	selected := r.URL.Query().Get("scenario")
-	report, err := RunSandbox(s.events, BatchNow())
+	report, err := RunSandboxIn(s.events, BatchNow(), s.scratchPath(""))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "", "")
 		return
@@ -357,7 +409,9 @@ func (s *streamServer) broadcastChainStatus(log []AuditEntry) {
 // the live SSE stream. The endpoint is intentionally simple: the C# app is the
 // authority on payment verification; this side just persists and broadcasts.
 func (s *streamServer) handlePaymentEvent(w http.ResponseWriter, r *http.Request) {
-	if _, ok := auth(w, r, ActionReadAuditLog); !ok {
+	// This endpoint WRITES to the audit log, so a read-only credential (auditor)
+	// must not be able to call it: require the admin-intervention permission.
+	if _, ok := auth(w, r, ActionAdminIntervention); !ok {
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -380,6 +434,15 @@ func (s *streamServer) handlePaymentEvent(w http.ResponseWriter, r *http.Request
 	if err := json.Unmarshal(body, &payload); err != nil || payload.EventID == "" {
 		http.Error(w, "invalid payload", http.StatusBadRequest)
 		return
+	}
+	if len(payload.EventID) > maxPaymentEventIDBytes || len(payload.EventType) > maxPaymentEventTypeBytes {
+		http.Error(w, "eventId or eventType too long", http.StatusBadRequest)
+		return
+	}
+	// Bound the free-text field so one forwarded event can never produce an
+	// oversized audit line.
+	if len(payload.Details) > maxPaymentDetailsBytes {
+		payload.Details = strings.ToValidUTF8(payload.Details[:maxPaymentDetailsBytes], "") + "…(truncated)"
 	}
 
 	// Map the payment state to the closest agent state.
@@ -414,18 +477,53 @@ func (s *streamServer) handlePaymentEvent(w http.ResponseWriter, r *http.Request
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
-// lockedAdminRules are hard compliance/safety rules that NEVER permit admin
-// override. If the decision engine fires one of these rules, the admin action
-// is refused — the rule name is surfaced to the UI as proof the guard held.
-var lockedAdminRules = map[RuleId]bool{
-	"fraud_high_score":           true,
-	"fraud_chargeback":           true,
-	"mandate_revoked":            true,
-	"dnc_match":                  true,
-	"quiet_hours":                true,
-	"touch_cap":                  true,
-	"fraud_velocity":             true,
-	"mandate_insufficient_funds": true,
+// lockedRuleFor reports the LOCKED compliance/safety rule (see LockedRuleIds)
+// that blocks any admin override of the event, if one applies. It scans EVERY
+// audit entry for the event rather than only the latest one: the latest row is
+// often an LLM-copy or a previous admin row whose ruleFired is no_op, which
+// would otherwise hide the locked rule that actually stopped the event. The
+// reason bucket is checked too, so a fraud_flagged / mandate_revoked event is
+// locked even in a flow whose engine reports it under a different rule name.
+func lockedRuleFor(entries []AuditEntry, eventID string) (RuleId, bool) {
+	for _, e := range entries {
+		if e.EventID != eventID {
+			continue
+		}
+		for _, id := range LockedRuleIds {
+			if e.RuleFired == id {
+				return id, true
+			}
+		}
+		if IsFraudFlagged(e.ReasonBucket) {
+			return RuleFraudSuppress, true
+		}
+		if IsMandateRevoked(e.ReasonBucket) {
+			return RuleMandateRevokedEsc, true
+		}
+	}
+	return "", false
+}
+
+// executedTouches counts the recovery actions already executed, per the audit
+// log, for one event (its attempt number) and for its customer (the touch-cap
+// input). An executed action is the row the runner writes after ExecuteAction:
+// a policy-engine row in state retrying/contacting that carries a channel.
+func executedTouches(entries []AuditEntry, eventID, customerID string) (attempts int, customerTouches int) {
+	for _, e := range entries {
+		if e.Actor != ActorPolicyEngine || e.Channel == "" {
+			continue
+		}
+		if e.State != AgentRetrying && e.State != AgentContacting {
+			continue
+		}
+		if e.EventID == eventID {
+			attempts++
+		}
+		if customerID != "" && e.CustomerID == customerID {
+			customerTouches++
+		}
+	}
+	return attempts, customerTouches
 }
 
 // handleAdminAction accepts a pre-approved admin intervention, re-runs the
@@ -482,6 +580,8 @@ func (s *streamServer) handleAdminAction(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	lockedRule, locked := lockedRuleFor(entries, req.EventID)
+
 	refusal := ""
 	refusalRule := ""
 	var decision Decision
@@ -491,7 +591,12 @@ func (s *streamServer) handleAdminAction(w http.ResponseWriter, r *http.Request)
 
 	switch req.Action {
 	case "nudge_retry":
-		if latest.State == AgentRecovered {
+		if locked {
+			// Name the locked rule itself, so the refusal shows WHICH
+			// compliance invariant held rather than a generic state.
+			refusal = "locked rule " + string(lockedRule) + " blocks retry"
+			refusalRule = string(lockedRule)
+		} else if latest.State == AgentRecovered {
 			refusal = "event already recovered"
 			refusalRule = "already_recovered"
 		} else if latest.State == AgentSuppressed {
@@ -500,7 +605,8 @@ func (s *streamServer) handleAdminAction(w http.ResponseWriter, r *http.Request)
 		} else {
 			// Re-run the decision engine if we have the source event.
 			if sourceEvent != nil {
-				ctx := buildRecoveryContext(sourceEvent, 0)
+				attempts, touches := executedTouches(entries, req.EventID, sourceEvent.CustomerID)
+				ctx := buildRecoveryContext(sourceEvent, attempts, touches)
 				result, err := StepState(ctx)
 				if err == nil {
 					decision = result.Audit.Decision
@@ -513,9 +619,9 @@ func (s *streamServer) handleAdminAction(w http.ResponseWriter, r *http.Request)
 				decision = DecisionRetry
 				state = AgentRetryScheduled
 			}
-			if lockedAdminRules[latest.RuleFired] {
-				refusal = "locked rule " + string(latest.RuleFired) + " blocks retry"
-				refusalRule = string(latest.RuleFired)
+			if locked {
+				refusal = "locked rule " + string(lockedRule) + " blocks retry"
+				refusalRule = string(lockedRule)
 				decision = DecisionNone
 				state = latest.State
 			}
@@ -535,9 +641,9 @@ func (s *streamServer) handleAdminAction(w http.ResponseWriter, r *http.Request)
 		if latest.State == AgentRecovered || latest.State == AgentSuppressed {
 			refusal = "event is in a terminal state"
 			refusalRule = "terminal_state"
-		} else if lockedAdminRules[latest.RuleFired] {
-			refusal = "locked rule " + string(latest.RuleFired) + " blocks channel override"
-			refusalRule = string(latest.RuleFired)
+		} else if locked {
+			refusal = "locked rule " + string(lockedRule) + " blocks channel override"
+			refusalRule = string(lockedRule)
 		}
 		decision = DecisionRetry
 		state = AgentRetryScheduled
@@ -547,9 +653,9 @@ func (s *streamServer) handleAdminAction(w http.ResponseWriter, r *http.Request)
 		if latest.State != AgentWaitingOnPtp {
 			refusal = "event is not in waiting_on_ptp state"
 			refusalRule = "not_ptp_pending"
-		} else if lockedAdminRules[latest.RuleFired] {
-			refusal = "locked rule " + string(latest.RuleFired) + " blocks PTP fulfillment"
-			refusalRule = string(latest.RuleFired)
+		} else if locked {
+			refusal = "locked rule " + string(lockedRule) + " blocks PTP fulfillment"
+			refusalRule = string(lockedRule)
 		} else {
 			decision = DecisionRecover
 			state = AgentRecovered
@@ -608,18 +714,21 @@ func (s *streamServer) handleAdminAction(w http.ResponseWriter, r *http.Request)
 }
 
 // buildRecoveryContext constructs a RecoveryContext from a FlowEvent so the
-// decision engine can re-evaluate it.
-func buildRecoveryContext(event *FlowEvent, attempt int) *RecoveryContext {
-	ctx := RecoveryContext{
+// decision engine can re-evaluate it. The reason bucket is re-derived with
+// Classify and the signal fields (PTP date, retry window, DNC flag, ...) are
+// carried over via flowContext, so the engine sees the same inputs the batch
+// runner gave it — a placeholder reason would hide fraud / mandate_revoked from
+// the very rules this re-run exists to enforce.
+func buildRecoveryContext(event *FlowEvent, attempt int, customerTouches int) *RecoveryContext {
+	base := RecoveryContext{
 		EventID:    event.EventID,
 		Flow:       event.Flow,
 		CustomerID: event.CustomerID,
 		InvoiceID:  event.InvoiceID,
 		Amount:     event.Amount,
 		Currency:   event.Currency,
-		Reason:     "admin_intervention",
-		Attempt:    attempt,
+		Reason:     Classify(event),
 		Now:        time.Now().UnixMilli(),
 	}
-	return &ctx
+	return flowContext(event, base, attempt, map[string]int{event.CustomerID: customerTouches})
 }

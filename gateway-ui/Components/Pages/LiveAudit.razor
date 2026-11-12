@@ -188,6 +188,10 @@
     protected override void OnInitialized()
     {
         Stream.StatusChanged += OnStatus;
+        // Show the stream's current state right away. StatusChanged only fires on
+        // a transition, so a page opened after the stream connected would
+        // otherwise say "connecting" forever.
+        OnStatus(Stream.CurrentStatus);
         _subId = Stream.Subscribe(OnStreamEvent);
         _ = LoadInitialChainAsync();
     }

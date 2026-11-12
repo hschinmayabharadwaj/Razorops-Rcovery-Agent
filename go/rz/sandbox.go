@@ -2,6 +2,7 @@ package rz
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -157,12 +158,22 @@ type SandboxReport struct {
 	Headline        string
 }
 
-// RunSandbox runs the baseline plus a tunable sweep.
+// DefaultWorkDir is where scenario / comparison audit logs are written when the
+// caller does not choose a directory.
+const DefaultWorkDir = "data"
+
+// RunSandbox runs the baseline plus a tunable sweep, writing scenario logs
+// under DefaultWorkDir.
 func RunSandbox(events []*FlowEvent, now int64) (SandboxReport, error) {
+	return RunSandboxIn(events, now, DefaultWorkDir)
+}
+
+// RunSandboxIn is RunSandbox with the scenario audit logs written under dir.
+func RunSandboxIn(events []*FlowEvent, now int64, dir string) (SandboxReport, error) {
 	if now == 0 {
-		now = time.Date(2026, 9, 1, 14, 30, 0, 0, time.UTC).UnixMilli()
+		now = BatchNow()
 	}
-	baselineRes, err := RunScenario(events, now, "baseline", func(*TunableConfig) {}, "data/sandbox.baseline.log.jsonl")
+	baselineRes, err := RunScenario(events, now, "baseline", func(*TunableConfig) {}, filepath.Join(dir, "sandbox.baseline.log.jsonl"))
 	if err != nil {
 		return SandboxReport{}, err
 	}
@@ -185,7 +196,7 @@ func RunSandbox(events []*FlowEvent, now int64) (SandboxReport, error) {
 
 	var results []SandboxResult
 	for _, s := range scenarios {
-		res, err := RunScenario(events, now, s.Label, s.Apply, "data/sandbox."+s.Label+".log.jsonl")
+		res, err := RunScenario(events, now, s.Label, s.Apply, filepath.Join(dir, "sandbox."+s.Label+".log.jsonl"))
 		if err != nil {
 			return SandboxReport{}, err
 		}

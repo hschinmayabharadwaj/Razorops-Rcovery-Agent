@@ -1,6 +1,7 @@
 package rz
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -18,7 +19,7 @@ func TestSandboxReport(t *testing.T) {
 	events := testEvents(t)
 	now := BatchNow()
 
-	report, err := RunSandbox(events, now)
+	report, err := RunSandboxIn(events, now, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +35,7 @@ func TestSandboxLockedInvariant(t *testing.T) {
 	events := testEvents(t)
 	now := BatchNow()
 
-	report, err := RunSandbox(events, now)
+	report, err := RunSandboxIn(events, now, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +53,7 @@ func TestSandboxTunablesMoveRecovery(t *testing.T) {
 	events := testEvents(t)
 	now := BatchNow()
 
-	report, err := RunSandbox(events, now)
+	report, err := RunSandboxIn(events, now, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func TestSandboxTunablesMoveRecovery(t *testing.T) {
 }
 
 func TestSandboxHeadline(t *testing.T) {
-	report, err := RunSandbox(testEvents(t), BatchNow())
+	report, err := RunSandboxIn(testEvents(t), BatchNow(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,7 @@ func TestSandboxExtremeScenario(t *testing.T) {
 			tc.MaxTouchesPerCustomer = 20
 			tc.MaxVoiceCalls = 20
 		},
-		"data/test.sandbox.extreme.log.jsonl")
+		filepath.Join(t.TempDir(), "sandbox.extreme.log.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -90,7 +90,7 @@ func ComputeEligibility(log []AuditEntry) eligibilityJSON {
 	terminal := map[string]AuditEntry{}
 	seen := map[string]bool{}
 	for _, e := range log {
-		if e.RuleFired == RuleDuplicateSuppress {
+		if e.RuleFired == RuleDuplicateSuppress || e.Flow == FlowPaymentEvent {
 			continue
 		}
 		seen[e.EventID] = true

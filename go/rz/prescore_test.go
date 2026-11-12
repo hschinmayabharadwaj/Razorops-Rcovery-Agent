@@ -1,6 +1,7 @@
 package rz
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -107,7 +108,7 @@ func TestPrescoreReportOverBatch(t *testing.T) {
 	events := testEvents(t)
 	now := BatchNow()
 
-	audit, err := NewAuditStore("data/test.prescore.log.jsonl")
+	audit, err := NewAuditStore(filepath.Join(t.TempDir(), "prescore.log.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +144,7 @@ func TestPrescoreEmitVerifiesChain(t *testing.T) {
 	events := testEvents(t)
 	now := BatchNow()
 
-	audit, err := NewAuditStore("data/test.prescore.emit.log.jsonl")
+	audit, err := NewAuditStore(filepath.Join(t.TempDir(), "prescore.emit.log.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
