@@ -1,0 +1,104 @@
+@page "/health"
+@using GatewayUI.Models
+@using GatewayUI.Services
+@using GatewayUI.Components.Shared
+@inject IGatewayApi Api
+@implements IDisposable
+
+<PageTitle>Channel Health</PageTitle>
+
+<div class="py-3">
+    <div class="d-flex align-items-center justify-content-between mb-1">
+        <h3 class="mb-0">Channel &amp; route health</h3>
+        <button class="btn btn-outline-secondary btn-sm" @onclick="LoadAsync">Refresh</button>
+    </div>
+    <p class="text-secondary small mb-3">
+        Recent recovery-channel performance compared with each channel's long-run baseline, plus the gateway and issuer
+        signals carried by payment-degradation events.
+    </p>
+
+    <ViewState T="HealthDto" Result="_result" Loading="@_loading">
+        @if (_result!.Data is { } h)
+        {
+            <div class="card shadow-sm mb-3">
+                <div class="card-header fw-semibold">Recovery channels</div>
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0" id="channel-health">
+                        <thead class="table-light">
+                            <tr><th>Channel</th><th class="text-end">Touches</th><th class="text-end">Recovered</th><th class="text-end">Recent rate</th><th class="text-end">Baseline</th><th>Status</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var c in h.Channels ?? new())
+                            {
+                                <tr>
+                                    <td class="fw-semibold">@c.Channel</td>
+                                    <td class="text-end">@c.Touches</td>
+                                    <td class="text-end">@c.Recovered</td>
+                                    <td class="text-end">@(c.Touches > 0 ? Fmt.Pct(c.SuccessRate) : "—")</td>
+                                    <td class="text-end">@(c.BaselineFrom > 0 ? Fmt.Pct(c.Baseline) : "—") <span class="text-secondary small">(@c.BaselineFrom)</span></td>
+                                    <td><span class="badge @Fmt.HealthBadge(c.Status)">@Fmt.Words(c.Status)</span></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+                <div class="card-footer small text-secondary">
+                    Degraded when the recent rate falls below @Fmt.Pct(h.DegradedRatio, 0) of baseline; judged only with at least @h.MinSamples touches on both sides.
+                </div>
+            </div>
+
+            <div class="card shadow-sm">
+                <div class="card-header fw-semibold">Gateway / issuer route signals</div>
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0" id="route-health">
+                        <thead class="table-light">
+                            <tr><th>Event</th><th>Reason</th><th class="text-end">Success rate</th><th class="text-end">Latency</th><th>Issuer</th><th>Error code</th><th>Status</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var r in h.Routes ?? new())
+                            {
+                                <tr>
+                                    <td><code>@r.EventId</code></td>
+                                    <td>@Fmt.Words(r.Reason)</td>
+                                    <td class="text-end">@(r.SuccessRate > 0 ? Fmt.Pct(r.SuccessRate) : "—")</td>
+                                    <td class="text-end">@(r.LatencyMs > 0 ? $"{r.LatencyMs:0} ms" : "—")</td>
+                                    <td>@(r.IssuerDown ? "down" : "up")</td>
+                                    <td>@(string.IsNullOrEmpty(r.ErrorCode) ? "—" : r.ErrorCode)</td>
+                                    <td><span class="badge @Fmt.HealthBadge(r.Status)">@Fmt.Words(r.Status)</span></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+                <div class="card-footer small text-secondary">
+                    Degraded below a @Fmt.Pct(h.SuccessRateFloor, 0) success rate, above @h.LatencyCeilingMs ms latency, or when the issuer is down.
+                </div>
+            </div>
+        }
+    </ViewState>
+</div>
+
+@code {
+    private ApiResult<HealthDto>? _result;
+    private bool _loading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Api.RoleChanged += OnRoleChanged;
+        await LoadAsync();
+    }
+
+    private void OnRoleChanged() => InvokeAsync(LoadAsync);
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _result = null;
+        StateHasChanged();
+        _result = await Api.GetHealthAsync();
+        _loading = false;
+        StateHasChanged();
+    }
+
+    public void Dispose() => Api.RoleChanged -= OnRoleChanged;
+}

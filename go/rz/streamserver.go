@@ -162,6 +162,11 @@ func (s *streamServer) handler() http.Handler {
 	mux.HandleFunc("/demo/tamper", s.handleTamper)
 	mux.HandleFunc("/payment-event", s.handlePaymentEvent)
 	mux.HandleFunc("/admin/action", s.handleAdminAction)
+	mux.HandleFunc("/recovery-progress", s.handleRecoveryProgress)
+	mux.HandleFunc("/intelligence/queue", s.handleQueue)
+	mux.HandleFunc("/intelligence/model", s.handleModel)
+	mux.HandleFunc("/intelligence/health", s.handleHealth)
+	mux.HandleFunc("/intelligence/profile", s.handleProfile)
 	return withCORS(mux)
 }
 
@@ -286,12 +291,14 @@ func (s *streamServer) handleComparePolicy(w http.ResponseWriter, r *http.Reques
 	}
 	s.computeMu.Lock()
 	defer s.computeMu.Unlock()
-	realAudit, err := NewAuditStore(s.scratchPath("audit.real.jsonl"))
+	// The comparison replays the batch into scratch logs; those replays are not
+	// live activity and must not appear on the live audit stream.
+	realAudit, err := NewScratchAuditStore(s.scratchPath("audit.real.jsonl"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "", "")
 		return
 	}
-	naiveAudit, err := NewAuditStore(s.scratchPath("audit.naive.jsonl"))
+	naiveAudit, err := NewScratchAuditStore(s.scratchPath("audit.naive.jsonl"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "", "")
 		return

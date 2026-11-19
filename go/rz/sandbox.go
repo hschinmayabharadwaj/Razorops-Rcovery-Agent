@@ -113,7 +113,8 @@ func NewSandboxStore(path string) *AuditStore {
 // violations, then restores defaults. Always restores, so callers share state.
 func RunScenario(events []*FlowEvent, now int64, label string, apply func(*TunableConfig), auditFile string) (SandboxResult, error) {
 	SetTunableField(apply)
-	stored, err := NewAuditStore(auditFile)
+	// Scenario runs are what-if replays, not live activity: never broadcast.
+	stored, err := NewScratchAuditStore(auditFile)
 	if err != nil {
 		ResetTunables()
 		return SandboxResult{}, err

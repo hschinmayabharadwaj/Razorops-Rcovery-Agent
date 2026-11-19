@@ -89,7 +89,54 @@ public sealed class DashboardJourneyTests : IClassFixture<E2EStack>
         { "/prescore", "Risk Prescore (predict-before-fail)" },
         { "/sandbox", "Backtest sandbox (tunable sweep)" },
         { "/recovery", "Recovery Progress" },
+        { "/queue", "Recovery work queue" },
+        { "/model", "Decision model" },
+        { "/health", "Channel & route health" },
     };
+
+    [E2EFact]
+    public async Task WorkQueue_RanksEligibleWork_AndExplainsADecision()
+    {
+        var page = await _stack.NewPageAsync();
+        await page.GotoAsync("/queue");
+
+        var rows = page.Locator("#work-queue tr.queue-row");
+        await Expect(rows.First).ToBeVisibleAsync();
+        await Expect(rows.First.Locator("td").Nth(5)).ToContainTextAsync("%");
+
+        // Expanding a row loads the Go-computed explanation (needs the live circuit).
+        var detail = page.Locator("tr.queue-detail");
+        for (var attempt = 0; attempt < 20 && !await detail.IsVisibleAsync(); attempt++)
+        {
+            await rows.First.ClickAsync();
+            await page.WaitForTimeoutAsync(500);
+        }
+        await Expect(detail).ToContainTextAsync("Shared signal profile");
+        await Expect(detail).ToContainTextAsync("flow+reason");
+        await Expect(detail.Locator("code").First).ToContainTextAsync(":");
+    }
+
+    [E2EFact]
+    public async Task DecisionModel_ShowsTheOutOfTimeComparison()
+    {
+        var page = await _stack.NewPageAsync();
+
+        await page.GotoAsync("/model");
+
+        await Expect(page.Locator("#head-comparison tbody tr")).ToHaveCountAsync(2);
+        await Expect(page.Locator(".calibration-col")).ToHaveCountAsync(10);
+        await Expect(page.Locator("#flow-slices tbody tr")).ToHaveCountAsync(7);
+    }
+
+    [E2EFact]
+    public async Task Overview_ShowsNextBestActionsFromTheWorkQueue()
+    {
+        var page = await _stack.NewPageAsync();
+
+        await page.GotoAsync("/");
+
+        await Expect(page.Locator("#next-actions .next-actions li")).ToHaveCountAsync(5);
+    }
 
     [E2ETheory]
     [MemberData(nameof(Pages))]

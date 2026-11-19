@@ -196,6 +196,47 @@
 		</section>
 	</div>
 
+	<section class="panel stagger-in mb-3" id="next-actions">
+		<div class="panel-header">
+			<div>
+				<span class="panel-kicker">Decision engine</span>
+				<h2>Next best actions</h2>
+			</div>
+			<a class="panel-link" href="queue">Full work queue <span>&#8594;</span></a>
+		</div>
+		@if (_queueError is not null)
+		{
+			<div class="table-empty-row">Work queue unavailable: @_queueError</div>
+		}
+		else if (_topActions is null)
+		{
+			<div class="table-empty-row">Ranking open recovery work…</div>
+		}
+		else if (_topActions.Count == 0)
+		{
+			<div class="table-empty-row">No eligible recovery work right now.</div>
+		}
+		else
+		{
+			<ol class="next-actions">
+				@foreach (var item in _topActions)
+				{
+					<li>
+						<span class="rank">#@item.Rank</span>
+						<span>
+							<code>@item.EventId</code> &middot; @FormatFlowShort(item.Flow)
+							<span class="action">@item.Recommendation</span>
+						</span>
+						<span class="value">
+							@FormatRupees(item.ExpectedRupees)
+							<small>@((item.Probability * 100).ToString("0"))% of @FormatRupees(item.AmountRupees)</small>
+						</span>
+					</li>
+				}
+			</ol>
+		}
+	</section>
+
 	<section class="panel activity-panel stagger-in">
 		<div class="panel-header">
 			<div>
@@ -287,9 +328,12 @@
 </div>
 
 @code {
+	private const int TopActionCount = 5;
+
 	private MetricsDto? _metrics;
-	private bool _loading = true;
 	private string? _metricsError;
+	private List<QueueItemDto>? _topActions;
+	private string? _queueError;
 
 	private bool _isChainValid = true;
 	private int _chainEntries;
@@ -399,12 +443,23 @@
 
 	private async Task LoadDataAsync()
 	{
-		_loading = true;
 		try
 		{
 			var metricsTask = Api.GetMetricsAsync();
 			var chainTask = Api.GetChainStatusAsync();
-			await Task.WhenAll(metricsTask, chainTask);
+			var queueTask = Api.GetWorkQueueAsync();
+			await Task.WhenAll(metricsTask, chainTask, queueTask);
+
+			var qRes = await queueTask;
+			if (qRes.Ok && qRes.Data?.Items is { } items)
+			{
+				_topActions = items.Where(i => i.Eligibility?.Eligible == true).Take(TopActionCount).ToList();
+				_queueError = null;
+			}
+			else
+			{
+				_queueError = qRes.AuthDenied ? "insufficient permissions" : qRes.Error ?? "failed to load";
+			}
 
 			var mRes = await metricsTask;
 			if (mRes.Ok && mRes.Data != null)
@@ -431,7 +486,6 @@
 		}
 		finally
 		{
-			_loading = false;
 			StateHasChanged();
 		}
 	}

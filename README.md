@@ -171,7 +171,7 @@ go/
     metrics.go        # metrics computed FROM the audit log
     table.go          # audit-log table + metrics view
     runner.go         # unified orchestrator (idempotency gate + per-customer touch caps)
-  rz/*_test.go        # 14 test files: 118 tests + 5 fuzz targets (see Testing section)
+  rz/*_test.go        # 15 test files: 144 tests + 5 fuzz targets (see Testing section)
   rz/integration_test.go # batch -> audit log -> HTTP handler, over a real loopback connection
   rz/hardening_test.go   # admin-override guard, redaction edge cases, atomic tunables, log limits
   rz/fuzz_test.go     # native Go fuzz targets: classify / parse / verify / redact / LLM
@@ -276,12 +276,70 @@ Output (computed, not claimed):
 *"25 of 28 events that were not auto-recovered (89% recall) had already been
 flagged high-risk BEFORE the attempt (49% precision)."*
 
-This is the same thesis as **Razorpay's Vulcan** (pattern-based payment
-intelligence at massive scale) — but transparent (named factors vs. undisclosed
-"3,000 signals"), merchant-portable (a pure function over your own data, not
-locked to Razorpay's rails), and compliance-native (the prescores are themselves
-hash-chained). The honest framing: *Vulcan validates the direction; ours is the
-auditable, portable version of it, for the recovery layer.*
+Read that number with care. The decision layer below evaluates this named-factor
+score out-of-time against real outcomes, and it ranks recoveries barely better
+than chance (AUC 0.51). Its customer "history" is synthetic and largely
+unrelated to what actually happens, so the high recall mostly reflects flagging
+many events. It stays as the transparent incumbent the learned head is measured
+against.
+
+## Decision intelligence (lessons from Razorpay Vulcan)
+
+**What Vulcan is.** Razorpay's Vulcan (launched August 2026) is a
+transformer-based foundation model for payments, not a language model, trained
+on roughly 3 trillion data points from about 4 billion payments. Its public
+launch covers four decisions: payment routing, fraud detection before
+authorisation, cash-on-delivery risk, and checkout payment-method ordering.
+Razorpay's engineering write-up describes its structure: a payment is encoded as
+a set of fields by a shared backbone pretrained with masked-field prediction,
+small task heads sit on top, routing outputs a calibrated success probability
+per *eligible* candidate, and live route-health and recent activity are fused in
+at decision time. Reported results (8–10% higher success rates, 8× more
+international card fraud caught, 5× more fraud and disputes at the same alert
+volume) are Razorpay's own figures against its previous stack, not independent
+benchmarks.
+
+**What we took, and where it lives.** We did not copy the network; a few
+hundred events per flow cannot train a transformer. We took the structure
+around it:
+
+| Vulcan practice | Our implementation |
+|---|---|
+| One shared payment representation, small task heads | `signals.go`: one decision-time `SignalProfile` feeds the recovery-probability head, the named-factor risk head and the work-queue ordering |
+| Decision-time cut-off; outcome fields never used as inputs | `ProfileExcludedOutcome` (for example `signal.recovered` on degradation events) is stripped before any feature is built |
+| No direct identifiers; stable references hashed | names, phones and emails never enter a profile; the customer id becomes a hashed token |
+| The model ranks only what is eligible; eligibility stays outside it | `AssessEligibility` applies the locked compliance rules first; blocked events are never ranked as work |
+| Calibrated success probability per candidate | `recoverymodel.go`: smoothed, hierarchical empirical rates (flow → reason → method → amount), calibrated by construction and explainable step by step |
+| Not every failure should train or trigger a retry | `ClassifyFailure` splits route-influenceable, customer-side, customer-left and blocked failures; the recommendation differs per class |
+| Recent context and live route health | `health.go`: recent channel success against its long-run baseline, plus gateway/issuer signals |
+| Out-of-time evaluation, calibration separate from ranking, per-flow slices, fixed alert volume, against the incumbent | `modeleval.go`: Brier, log loss, AUC, calibration error, 10-bin reliability, per-flow slices, precision at 10/20/30% alert volume |
+
+**Training data.** An 800-event history batch (its own seed) is run through the
+real policy engine into an in-memory, hash-chained audit log; labels come from
+that log. The served 60-event batch is never trained on.
+
+**Results on this data (out-of-time, 304 test events):**
+
+| Head | Brier ↓ | AUC ↑ | Calibration error ↓ |
+|---|---|---|---|
+| Learned recovery head | 0.096 | 0.94 | 0.060 |
+| Incumbent named-factor risk | 0.341 | 0.51 | 0.262 |
+
+At every fixed alert volume tested (10/20/30%), the events the learned head
+flags as least likely to recover all truly failed, against 52–57% for the
+incumbent. Caveat: the simulator decides outcomes mostly from flow and reason,
+which this head models directly, so the gap is wider than it would be on real
+traffic. The evaluation code is what transfers; the numbers do not.
+
+**Endpoints** (Go, read-only, `read_audit_log` permission):
+`/intelligence/queue` (ranked work), `/intelligence/model` (model card and
+evaluation), `/intelligence/health`, `/intelligence/profile?eventId=…` (one
+event explained), and `/recovery-progress`.
+
+Sources: [Razorpay engineering blog: how Vulcan was built](https://razorpay.com/blog/vulcan-how-razorpay-built-a-foundation-model-for-payment-decisions),
+[Razorpay launch post](https://razorpay.com/blog/one-foundation-model-built-for-indias-payments-ecosystem/),
+[The Paypers](https://thepaypers.com/payments/news/razorpay-launches-vulcan-ai-foundation-model-for-payments-across-india),
+[Business Standard: early results](https://www.business-standard.com/amp/content/press-releases-ani/8x-more-international-card-fraud-stopped-early-results-from-razorpay-s-vulcan-ai-payments-model-126111300646_1.html).
 
 ## Backtest sandbox: tunables move, LOCKED rules don't
 
@@ -490,7 +548,7 @@ cd go
 export PATH="$HOME/go-toolchain/go/bin:$PATH"   # adjust to your Go install
 go build ./...
 go vet ./...
-go test ./rz/                     # 14 test files: 118 tests + 5 fuzz seed-corpora
+go test ./rz/                     # 15 test files: 144 tests + 5 fuzz seed-corpora
 go test -run Integration ./rz/    # only the HTTP integration tests
 go test -cover ./rz/              # statement coverage
 ```
@@ -499,7 +557,7 @@ Blazor UI (from the repository root):
 
 ```bash
 dotnet build RazorGateway.slnx
-dotnet test  RazorGateway.slnx                                   # 74 unit + integration tests (browser tests skipped)
+dotnet test  RazorGateway.slnx                                   # 79 unit + integration tests (browser tests skipped)
 dotnet test  RazorGateway.slnx --filter "FullyQualifiedName~Unit"
 dotnet test  RazorGateway.slnx --filter "FullyQualifiedName~Integration"
 ```
@@ -509,7 +567,7 @@ Blazor app and a real browser (needs Go on the PATH and Chrome or Edge):
 
 ```powershell
 $env:RUN_E2E = "1"
-dotnet test .\tests\GatewayUI.E2E\GatewayUI.E2E.csproj           # 10 browser tests
+dotnet test .\tests\GatewayUI.E2E\GatewayUI.E2E.csproj           # 16 browser tests
 ```
 
 Set `E2E_BROWSER_CHANNEL` to `chrome`, `msedge` or `chromium` to pin a browser

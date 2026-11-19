@@ -164,6 +164,60 @@ func TestStoreReadsLinesLongerThanDefaultScannerLimit(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreChainsClaimsAndClears(t *testing.T) {
+	store := NewMemoryAuditStore()
+	for _, id := range []string{"a", "b"} {
+		if err := store.Append(baseEntry(map[string]any{"eventId": id})); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entries, err := store.All()
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("entries=%d err=%v", len(entries), err)
+	}
+	if v := VerifyChain(entries); !v.Valid {
+		t.Fatalf("memory chain broken at %d", v.BrokenAtIndex)
+	}
+	if first, _ := store.Claim("a"); first {
+		t.Fatal("an event already in the memory log was claimable again")
+	}
+	if err := store.Clear(); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := store.All(); len(after) != 0 {
+		t.Fatalf("clear left %d entries", len(after))
+	}
+	if store.Path() != "" {
+		t.Fatalf("memory store reports a file path %q", store.Path())
+	}
+}
+
+func TestQuietStoresNeverBroadcast(t *testing.T) {
+	hub := NewStreamHub()
+	previous := BroadcastHub
+	BroadcastHub = hub
+	defer func() { BroadcastHub = previous }()
+	ch := hub.Subscribe()
+	scratch, err := NewScratchAuditStore(filepath.Join(t.TempDir(), "scratch.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scratch.Append(baseEntry(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewMemoryAuditStore().Append(baseEntry(nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case frame := <-ch:
+		t.Fatalf("quiet store broadcast a frame: %s", frame)
+	default:
+	}
+}
+
 func TestRedactPIIDoesNotLeakDegenerateShapes(t *testing.T) {
 	out := RedactPII(map[string]any{
 		"customerEmail": "not-an-email-secret",
