@@ -1,0 +1,85 @@
+@using GatewayUI.Models
+
+@* Explains one event: the shared decision-time profile, how the recovery
+   probability was built, the named risk factors, and the eligibility verdict. *@
+
+@if (Error is not null)
+{
+    <div class="alert alert-warning small mb-0">@Error</div>
+}
+else if (Profile is null)
+{
+    <div class="text-secondary small py-2">
+        <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Loading explanation…
+    </div>
+}
+else
+{
+    <div class="row g-3 py-2 profile-panel">
+        <div class="col-lg-4">
+            <div class="fw-semibold small mb-1">Shared signal profile</div>
+            <div class="d-flex flex-wrap gap-1 mb-2">
+                @foreach (var token in Profile.Tokens ?? new())
+                {
+                    <code class="border rounded px-1 bg-white">@token</code>
+                }
+            </div>
+            <div class="small text-secondary">
+                Decision-time fields only. Names, phone numbers and emails are excluded; the customer id is hashed.
+            </div>
+        </div>
+        <div class="col-lg-4">
+            <div class="fw-semibold small mb-1">Recovery probability: @Fmt.Pct(Profile.Probability)</div>
+            <table class="table table-sm table-borderless small mb-0">
+                <thead><tr class="text-secondary"><th>Level</th><th class="text-end">Seen</th><th class="text-end">Observed</th><th class="text-end">Estimate</th></tr></thead>
+                <tbody>
+                    @foreach (var step in Profile.Path ?? new())
+                    {
+                        <tr>
+                            <td>@step.Level</td>
+                            <td class="text-end">@step.Observations</td>
+                            <td class="text-end">@(step.Observations > 0 ? Fmt.Pct(step.ObservedRate, 0) : "—")</td>
+                            <td class="text-end fw-semibold">@Fmt.Pct(step.Estimate)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+            <div class="small text-secondary">Each level refines the coarser estimate in proportion to how much history it has.</div>
+        </div>
+        <div class="col-lg-4">
+            <div class="fw-semibold small mb-1">
+                Risk @Profile.RiskScore/100 <span class="badge @Fmt.RiskBadge(Profile.RiskTier)">@Profile.RiskTier</span>
+            </div>
+            <ul class="small mb-2 ps-3">
+                @foreach (var factor in Profile.RiskFactors ?? new())
+                {
+                    <li>@factor.Label (@factor.Value): +@factor.Contribution</li>
+                }
+                @if (Profile.RiskFactors is not { Count: > 0 })
+                {
+                    <li class="text-secondary">no risk factors fired</li>
+                }
+            </ul>
+            <div class="fw-semibold small mb-1">Eligibility</div>
+            @if (Profile.Eligibility?.Eligible == true)
+            {
+                <div class="small text-success">Eligible — current state: @Fmt.Words(Profile.Eligibility.State)</div>
+            }
+            else
+            {
+                <div class="small text-danger">
+                    Not eligible: @Profile.Eligibility?.Reason
+                    @if (!string.IsNullOrEmpty(Profile.Eligibility?.BlockingRule))
+                    {
+                        <span>(rule <code>@Profile.Eligibility.BlockingRule</code>)</span>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public SignalProfileDto? Profile { get; set; }
+    [Parameter] public string? Error { get; set; }
+}

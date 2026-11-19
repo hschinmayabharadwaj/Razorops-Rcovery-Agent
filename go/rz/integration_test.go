@@ -108,6 +108,11 @@ func TestIntegrationEveryRouteDeniesMissingAndUnknownCredentials(t *testing.T) {
 		{http.MethodPost, "/demo/tamper"},
 		{http.MethodPost, "/payment-event"},
 		{http.MethodPost, "/admin/action"},
+		{http.MethodGet, "/recovery-progress"},
+		{http.MethodGet, "/intelligence/queue"},
+		{http.MethodGet, "/intelligence/model"},
+		{http.MethodGet, "/intelligence/health"},
+		{http.MethodGet, "/intelligence/profile"},
 	}
 	for _, route := range routes {
 		for _, key := range []string{"", "not_a_real_key"} {
@@ -286,6 +291,127 @@ func TestIntegrationSandboxSweepKeepsLockedRulesAtZero(t *testing.T) {
 	}
 }
 
+func TestIntegrationWorkQueueRanksEligibleWorkAndBlocksLockedEvents(t *testing.T) {
+	env := newIntegrationEnv(t)
+
+	var got queueJSON
+	env.getJSON(t, "/intelligence/queue", auditorKey, &got)
+
+	if len(got.Items) != len(env.events) || got.EligibleCount+got.BlockedCount != len(env.events) {
+		t.Fatalf("queue covers %d items (%d eligible + %d blocked), want %d", len(got.Items), got.EligibleCount, got.BlockedCount, len(env.events))
+	}
+	fraudEvent := firstEventWithRule(t, env.log(t), RuleFraudSuppress)
+	for i, it := range got.Items {
+		if it.Probability < 0 || it.Probability > 1 {
+			t.Fatalf("item %s probability %.3f outside [0,1]", it.EventID, it.Probability)
+		}
+		if it.EventID == fraudEvent && it.Eligibility.Eligible {
+			t.Fatalf("fraud-suppressed event %s is eligible for automated work", it.EventID)
+		}
+		if it.Eligibility.State == string(AgentRecovered) && it.Eligibility.Eligible {
+			t.Fatalf("recovered event %s is still queued", it.EventID)
+		}
+		if i > 0 && it.Eligibility.Eligible && !got.Items[i-1].Eligibility.Eligible {
+			t.Fatalf("eligible %s ranked after a blocked item", it.EventID)
+		}
+		if len(it.ExplanationPath) == 0 {
+			t.Fatalf("item %s has no explanation", it.EventID)
+		}
+	}
+	if got.ModelTrainedOn != IntelligenceHistoryCount {
+		t.Fatalf("model trained on %d events, want %d", got.ModelTrainedOn, IntelligenceHistoryCount)
+	}
+}
+
+func TestIntegrationModelCardReportsOutOfTimeEvaluation(t *testing.T) {
+	env := newIntegrationEnv(t)
+
+	var got modelCardJSON
+	env.getJSON(t, "/intelligence/model", operatorKey, &got)
+
+	if got.Strategy != "out_of_time" || got.SplitAt == "" || got.TrainCount == 0 || got.TestCount == 0 {
+		t.Fatalf("model card lacks the out-of-time split: %+v", got)
+	}
+	if got.Learned.Brier >= got.Incumbent.Brier {
+		t.Fatalf("learned Brier %.4f should beat incumbent %.4f", got.Learned.Brier, got.Incumbent.Brier)
+	}
+	if len(got.Learned.Bins) != CalibrationBins || len(got.Learned.Slices) != len(FlowTypes) {
+		t.Fatalf("card has %d bins and %d slices", len(got.Learned.Bins), len(got.Learned.Slices))
+	}
+	if len(got.ExcludedPII) == 0 || len(got.ExcludedOutcome) == 0 {
+		t.Fatal("card must state the excluded PII and outcome fields")
+	}
+}
+
+func TestIntegrationHealthAndProfile(t *testing.T) {
+	env := newIntegrationEnv(t)
+
+	var health healthJSON
+	env.getJSON(t, "/intelligence/health", auditorKey, &health)
+	if len(health.Channels) == 0 || len(health.Routes) == 0 {
+		t.Fatalf("health is empty: %+v", health)
+	}
+
+	var profile profileJSON
+	target := env.events[0]
+	env.getJSON(t, "/intelligence/profile?eventId="+target.EventID, auditorKey, &profile)
+	if profile.EventID != target.EventID || len(profile.Path) == 0 || len(profile.Tokens) == 0 {
+		t.Fatalf("profile incomplete: %+v", profile)
+	}
+	raw, _ := json.Marshal(profile)
+	for _, secret := range []string{target.CustomerID, target.CustomerName, target.CustomerPhone, target.CustomerEmail} {
+		if secret != "" && strings.Contains(string(raw), secret) {
+			t.Fatalf("profile endpoint leaks %q", secret)
+		}
+	}
+
+	status, _ := env.do(t, http.MethodGet, "/intelligence/profile?eventId=missing", auditorKey, "")
+	if status != http.StatusNotFound {
+		t.Fatalf("unknown event: status %d, want 404", status)
+	}
+}
+
+func TestIntegrationRecoveryProgressMatchesMetrics(t *testing.T) {
+	env := newIntegrationEnv(t)
+
+	var progress progressJSON
+	env.getJSON(t, "/recovery-progress", auditorKey, &progress)
+	var metrics metricsJSON
+	env.getJSON(t, "/metrics", auditorKey, &metrics)
+
+	if progress.Outcomes["recovered"].Count != metrics.RecoveredCount {
+		t.Fatalf("progress recovered %d, metrics recovered %d", progress.Outcomes["recovered"].Count, metrics.RecoveredCount)
+	}
+	if progress.TotalEvents != len(env.events) {
+		t.Fatalf("progress tracks %d events, want %d", progress.TotalEvents, len(env.events))
+	}
+}
+
+func TestIntegrationScratchRunsNeverReachTheLiveStream(t *testing.T) {
+	env := newIntegrationEnv(t)
+	stream := openEvents(t, env, adminKey)
+	for range env.log(t) {
+		stream.next(t)
+	}
+
+	// Each of these replays the batch into scratch / in-memory logs.
+	for _, path := range []string{"/compare-policy", "/sandbox", "/intelligence/queue"} {
+		if status, body := env.do(t, http.MethodGet, path, adminKey, ""); status != http.StatusOK {
+			t.Fatalf("GET %s: status %d, body %s", path, status, body)
+		}
+	}
+	// A real append afterwards must be the very next frame on the stream.
+	status, raw := env.do(t, http.MethodPost, "/payment-event", adminKey,
+		`{"eventId":"pay_after_scratch","eventType":"payment.captured","state":"accepted","details":"{}"}`)
+	if status != http.StatusOK {
+		t.Fatalf("payment-event status %d, body %s", status, raw)
+	}
+
+	if frame := stream.next(t); frame["eventId"] != "pay_after_scratch" {
+		t.Fatalf("scratch replay leaked onto the live stream: first frame after the runs = %v", frame)
+	}
+}
+
 func TestIntegrationComputeEndpointsFailClosedWithoutEvents(t *testing.T) {
 	store, err := NewAuditStore(filepath.Join(t.TempDir(), "audit.log.jsonl"))
 	if err != nil {
@@ -295,7 +421,7 @@ func TestIntegrationComputeEndpointsFailClosedWithoutEvents(t *testing.T) {
 	server := httptest.NewServer(s.handler())
 	defer server.Close()
 
-	for _, path := range []string{"/compare-policy", "/prescore", "/sandbox"} {
+	for _, path := range []string{"/compare-policy", "/prescore", "/sandbox", "/intelligence/queue", "/intelligence/model"} {
 		req, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
 		if err != nil {
 			t.Fatal(err)

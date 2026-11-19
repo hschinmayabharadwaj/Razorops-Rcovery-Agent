@@ -44,6 +44,11 @@ public interface IGatewayApi
     Task<ApiResult<ChainStatusDto>> GetChainStatusAsync();
     Task<ApiResult<string>> PostTamperAsync();
     Task<ApiResult<AdminActionResult>> PostAdminActionAsync(AdminActionRequest request);
+    Task<ApiResult<WorkQueueDto>> GetWorkQueueAsync();
+    Task<ApiResult<ModelCardDto>> GetModelCardAsync();
+    Task<ApiResult<HealthDto>> GetHealthAsync();
+    Task<ApiResult<SignalProfileDto>> GetSignalProfileAsync(string eventId);
+    Task<ApiResult<RecoveryProgressDto>> GetRecoveryProgressAsync();
     HttpRequestMessage NewRequest(HttpMethod method, string path);
 }
 
@@ -150,6 +155,14 @@ public class GatewayApiService : IGatewayApi
     public Task<ApiResult<PolicyComparisonDto>> GetComparisonAsync() => GetAsync<PolicyComparisonDto>("/compare-policy");
     public Task<ApiResult<PrescoreDto>> GetPrescoreAsync() => GetAsync<PrescoreDto>("/prescore");
     public Task<ApiResult<ChainStatusDto>> GetChainStatusAsync() => GetAsync<ChainStatusDto>("/chain-status");
+
+    // Decision layer (go/rz/intelligence_api.go).
+    public Task<ApiResult<WorkQueueDto>> GetWorkQueueAsync() => GetAsync<WorkQueueDto>("/intelligence/queue");
+    public Task<ApiResult<ModelCardDto>> GetModelCardAsync() => GetAsync<ModelCardDto>("/intelligence/model");
+    public Task<ApiResult<HealthDto>> GetHealthAsync() => GetAsync<HealthDto>("/intelligence/health");
+    public Task<ApiResult<SignalProfileDto>> GetSignalProfileAsync(string eventId) =>
+        GetAsync<SignalProfileDto>("/intelligence/profile?eventId=" + Uri.EscapeDataString(eventId));
+    public Task<ApiResult<RecoveryProgressDto>> GetRecoveryProgressAsync() => GetAsync<RecoveryProgressDto>("/recovery-progress");
 
     // POST /demo/tamper. The UI ignores the body — the badge flips in response
     // to the chain_status event arriving over the SSE stream, never this POST.

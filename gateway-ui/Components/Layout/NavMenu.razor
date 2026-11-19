@@ -5,8 +5,8 @@
     <div class="container-fluid d-flex justify-content-between align-items-center">
             <a class="navbar-brand" href=""><span class="brand-mark">R</span><span>razor<span class="brand-accent">ops</span></span></a>
         <div class="d-flex align-items-center gap-2 text-white-50 small">
-            <span class="d-none d-sm-inline">active role</span>
-            <select class="form-select form-select-sm" style="width:auto" value="@_role" @onchange="OnRoleChange">
+            <label class="d-none d-sm-inline" for="role-select">active role</label>
+            <select id="role-select" class="form-select form-select-sm" style="width:auto" value="@_role" @onchange="OnRoleChange">
                 @foreach (var role in Roles)
                 {
                     <option value="@role">@role</option>
@@ -19,53 +19,51 @@
 
 <input type="checkbox" title="Navigation menu" class="navbar-toggler" />
 
+@* Navigation follows the Go engine's capabilities: operate the recovery work,
+   understand the decisions behind it, and govern the policy itself. *@
 <div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
-    <nav class="nav flex-column">
-        <div class="nav-caption">Workspace</div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="" Match="NavLinkMatch.All"><span class="bi bi-grid" aria-hidden="true"></span> Overview</NavLink>
-        </div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="liveaudit" Match="NavLinkMatch.All">
-                <span class="bi bi-activity" aria-hidden="true"></span> Live Audit
-            </NavLink>
-        </div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="recovery" Match="NavLinkMatch.All">
-                <span class="bi bi-graph-up-arrow" aria-hidden="true"></span> Recovery Progress
-            </NavLink>
-        </div>
-        <div class="nav-caption nav-caption-spaced">Intelligence</div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="metrics">
-                <span class="bi bi-bar-chart" aria-hidden="true"></span> Metrics
-            </NavLink>
-        </div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="compare-policy">
-                <span class="bi bi-git-compare" aria-hidden="true"></span> Compare Policy
-            </NavLink>
-        </div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="prescore">
-                <span class="bi bi-graph-up" aria-hidden="true"></span> Prescore
-            </NavLink>
-        </div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="sandbox">
-                <span class="bi bi-sliders" aria-hidden="true"></span> Sandbox
-            </NavLink>
-        </div>
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="exceptions">
-                <span class="bi bi-exclamation-triangle" aria-hidden="true"></span> Exceptions
-            </NavLink>
-        </div>
-        <div class="sidebar-footer"><span class="footer-icon">&#10003;</span><div><strong>All systems operational</strong><small>Updated just now</small></div></div>
+    <nav class="nav flex-column" aria-label="Main">
+        @foreach (var group in Sections)
+        {
+            <div class="nav-caption @(group == Sections[0] ? "" : "nav-caption-spaced")">@group.Title</div>
+            @foreach (var link in group.Links)
+            {
+                <div class="nav-item px-3">
+                    <NavLink class="nav-link" href="@link.Href" Match="@(link.Href == "" ? NavLinkMatch.All : NavLinkMatch.Prefix)">
+                        <span class="bi @link.Icon" aria-hidden="true"></span> @link.Label
+                    </NavLink>
+                </div>
+            }
+        }
+        <div class="sidebar-footer"><span class="footer-icon">&#10003;</span><div><strong>Go engine is the source of truth</strong><small>every number on these pages is computed there</small></div></div>
     </nav>
 </div>
 
 @code {
+    private sealed record NavItem(string Label, string Href, string Icon);
+    private sealed record NavSection(string Title, NavItem[] Links);
+
+    private static readonly NavSection[] Sections =
+    [
+        new("Operate", [
+            new("Overview", "", "bi-grid"),
+            new("Work queue", "queue", "bi-list-ol"),
+            new("Live audit", "liveaudit", "bi-activity"),
+            new("Review queue", "exceptions", "bi-exclamation-triangle"),
+        ]),
+        new("Decision intelligence", [
+            new("Decision model", "model", "bi-cpu"),
+            new("Channel health", "health", "bi-heart-pulse"),
+            new("Risk prescore", "prescore", "bi-graph-up"),
+            new("Recovery progress", "recovery", "bi-graph-up-arrow"),
+        ]),
+        new("Governance", [
+            new("Metrics", "metrics", "bi-bar-chart"),
+            new("Policy compare", "compare-policy", "bi-git-compare"),
+            new("Backtest sandbox", "sandbox", "bi-sliders"),
+        ]),
+    ];
+
     private static readonly string[] Roles = GatewayApiService.Roles;
     private string _role = "admin";
 

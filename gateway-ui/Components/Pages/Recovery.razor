@@ -1,7 +1,9 @@
 @page "/recovery"
 @using GatewayUI.Models
 @using GatewayUI.Services
+@using GatewayUI.Components.Shared
 @inject AuditStreamService Stream
+@inject IGatewayApi Api
 @implements IAsyncDisposable
 
 <PageTitle>Recovery Progress</PageTitle>
@@ -12,141 +14,106 @@
         <span class="badge @StatusBadgeClass">@StatusText</span>
     </div>
 
-    @if (TotalAtRisk > 0)
-    {
-        <div class="card mb-4">
-            <div class="card-body text-center py-4">
-                <h1 class="display-4 fw-bold mb-0" style="color: #198754;">
-                    @FormatRupees(Recovered) <span class="text-muted fs-5 fw-normal">of @FormatRupees(TotalAtRisk)</span>
-                </h1>
-                <p class="text-muted mb-3">at-risk recovered so far</p>
+    <ViewState T="RecoveryProgressDto" Result="_result" Loading="@(_result is null)">
+        @if (_result!.Data is { } p)
+        {
+            var recovered = p.Bucket("recovered");
+            var escalated = p.Bucket("escalated");
+            var abandoned = p.Bucket("abandoned");
+            var suppressed = p.Bucket("suppressed");
+            var inFlight = p.Bucket("in_flight");
 
-                <div class="progress" style="height: 28px; border-radius: 14px; overflow: hidden;">
-                    @if (TotalAtRisk > 0)
-                    {
-                        <div class="progress-bar bg-success" style="width: @Pct(Recovered)%;" title="Recovered">@(PctString(Recovered))%</div>
-                        <div class="progress-bar bg-warning" style="width: @Pct(Escalated)%;" title="Escalated"></div>
-                        <div class="progress-bar bg-danger" style="width: @Pct(Abandoned)%;" title="Abandoned"></div>
-                        <div class="progress-bar bg-secondary" style="width: @Pct(Suppressed)%;" title="Suppressed"></div>
-                        <div class="progress-bar bg-info" style="width: @Pct(InFlight)%;" title="In flight"></div>
-                    }
-                </div>
-                <div class="d-flex justify-content-between mt-2 small text-muted">
-                    <span><i class="bi bi-circle-fill text-success"></i> Recovered</span>
-                    <span><i class="bi bi-circle-fill text-warning"></i> Escalated</span>
-                    <span><i class="bi bi-circle-fill text-danger"></i> Abandoned</span>
-                    <span><i class="bi bi-circle-fill text-secondary"></i> Suppressed</span>
-                    <span><i class="bi bi-circle-fill text-info"></i> In flight</span>
-                </div>
-            </div>
-        </div>
-    }
+            @if (p.TotalAtRiskRupees > 0)
+            {
+                <div class="card mb-4">
+                    <div class="card-body text-center py-4">
+                        <h1 class="display-4 fw-bold mb-0" style="color: #198754;">
+                            @Fmt.Rupees(recovered.Rupees) <span class="text-muted fs-5 fw-normal">of @Fmt.Rupees(p.TotalAtRiskRupees)</span>
+                        </h1>
+                        <p class="text-muted mb-3">at-risk recovered so far</p>
 
-    <div class="row g-3 mb-4">
-        <div class="col-md-3">
-            <div class="card border-success h-100">
-                <div class="card-body text-center">
-                    <h6 class="card-subtitle mb-1 text-muted">Recovered</h6>
-                    <h3 class="card-title text-success mb-0">@RecoveredCount</h3>
-                    <small class="text-muted">@FormatRupees(Recovered)</small>
+                        <div class="progress" style="height: 28px; border-radius: 14px; overflow: hidden;">
+                            <div class="progress-bar bg-success" style="width: @Width(recovered, p)" title="Recovered">@Share(recovered, p)</div>
+                            <div class="progress-bar bg-warning" style="width: @Width(escalated, p)" title="Escalated"></div>
+                            <div class="progress-bar bg-danger" style="width: @Width(abandoned, p)" title="Abandoned"></div>
+                            <div class="progress-bar bg-secondary" style="width: @Width(suppressed, p)" title="Suppressed"></div>
+                            <div class="progress-bar bg-info" style="width: @Width(inFlight, p)" title="In flight"></div>
+                        </div>
+                        <div class="d-flex justify-content-between mt-2 small text-muted">
+                            <span><i class="bi bi-circle-fill text-success"></i> Recovered</span>
+                            <span><i class="bi bi-circle-fill text-warning"></i> Escalated</span>
+                            <span><i class="bi bi-circle-fill text-danger"></i> Abandoned</span>
+                            <span><i class="bi bi-circle-fill text-secondary"></i> Suppressed</span>
+                            <span><i class="bi bi-circle-fill text-info"></i> In flight</span>
+                        </div>
+                    </div>
                 </div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card border-warning h-100">
-                <div class="card-body text-center">
-                    <h6 class="card-subtitle mb-1 text-muted">Escalated</h6>
-                    <h3 class="card-title text-warning mb-0">@EscalatedCount</h3>
-                    <small class="text-muted">@FormatRupees(Escalated)</small>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card border-danger h-100">
-                <div class="card-body text-center">
-                    <h6 class="card-subtitle mb-1 text-muted">Abandoned</h6>
-                    <h3 class="card-title text-danger mb-0">@AbandonedCount</h3>
-                    <small class="text-muted">@FormatRupees(Abandoned)</small>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card border-secondary h-100">
-                <div class="card-body text-center">
-                    <h6 class="card-subtitle mb-1 text-muted">Suppressed</h6>
-                    <h3 class="card-title text-secondary mb-0">@SuppressedCount</h3>
-                    <small class="text-muted">@FormatRupees(Suppressed)</small>
-                </div>
-            </div>
-        </div>
-    </div>
+            }
 
-    @if (InFlightCount > 0)
-    {
-        <div class="card mb-4">
-            <div class="card-body">
-                <h6 class="text-muted mb-2">In-Flight Funnel</h6>
-                <div class="d-flex gap-3 flex-wrap">
-                    <span class="badge bg-light text-dark fs-6">Detected: @DetectedCount</span>
-                    <span class="badge bg-primary fs-6">Retry scheduled: @RetryScheduledCount</span>
-                    <span class="badge bg-primary fs-6">Retrying: @RetryingCount</span>
-                    <span class="badge bg-info text-dark fs-6">Contact scheduled: @ContactScheduledCount</span>
-                    <span class="badge bg-info text-dark fs-6">Contacting: @ContactingCount</span>
-                    <span class="badge bg-info text-dark fs-6">Waiting on PTP: @WaitingOnPtpCount</span>
-                </div>
+            <div class="row g-3 mb-4">
+                @foreach (var (label, bucket, css) in new[]
+                {
+                    ("Recovered", recovered, "success"),
+                    ("Escalated", escalated, "warning"),
+                    ("Abandoned", abandoned, "danger"),
+                    ("Suppressed", suppressed, "secondary"),
+                })
+                {
+                    <div class="col-md-3">
+                        <div class="card border-@css h-100">
+                            <div class="card-body text-center">
+                                <h6 class="card-subtitle mb-1 text-muted">@label</h6>
+                                <h3 class="card-title text-@css mb-0">@bucket.Count</h3>
+                                <small class="text-muted">@Fmt.Rupees(bucket.Rupees)</small>
+                            </div>
+                        </div>
+                    </div>
+                }
             </div>
-        </div>
-    }
 
-    @if (TotalEvents == 0)
-    {
-        <div class="text-center text-muted py-5">
-            <p class="mb-0">Waiting for audit events…</p>
-            <small>Connects to the live SSE stream — totals will appear as events arrive.</small>
-        </div>
-    }
-    else
-    {
-        <div class="text-center text-muted small">
-            @TotalEvents events tracked · Recovery rate: @(PctString(Recovered))%
-        </div>
-    }
+            @if (inFlight.Count > 0)
+            {
+                <div class="card mb-4">
+                    <div class="card-body">
+                        <h6 class="text-muted mb-2">In-flight funnel</h6>
+                        <div class="d-flex gap-3 flex-wrap">
+                            @foreach (var (state, count) in (p.InFlightStates ?? new()).OrderBy(kv => kv.Key))
+                            {
+                                <span class="badge bg-info text-dark fs-6">@Fmt.Words(state): @count</span>
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
+
+            <div class="text-center text-muted small">
+                @p.TotalEvents events tracked · Recovery rate: @Share(recovered, p) · computed by the Go engine
+            </div>
+        }
+    </ViewState>
 </div>
 
 @code {
+    // Coalesce bursts of stream events into one refresh.
+    private static readonly TimeSpan RefreshDebounce = TimeSpan.FromMilliseconds(500);
+
+    private ApiResult<RecoveryProgressDto>? _result;
     private long _subId = -1;
-    private readonly Dictionary<string, EventState> _eventStates = new();
+    private int _refreshQueued;
+    private bool _disposed;
 
     private string StatusText = "connecting";
     private string StatusBadgeClass = "bg-secondary";
 
-    // Running totals (in paise, converted to rupees for display)
-    private long TotalAtRisk;
-    private long Recovered;
-    private long Escalated;
-    private long Suppressed;
-    private long Abandoned;
-    private long InFlight;
-    private int TotalEvents;
-    private int RecoveredCount;
-    private int EscalatedCount;
-    private int AbandonedCount;
-    private int SuppressedCount;
-    private int InFlightCount;
-    private int DetectedCount;
-    private int RetryScheduledCount;
-    private int RetryingCount;
-    private int ContactScheduledCount;
-    private int ContactingCount;
-    private int WaitingOnPtpCount;
-
-    private sealed record EventState(string State, long Amount);
-
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
         Stream.StatusChanged += OnStatus;
         // StatusChanged only fires on a transition; show the current state now.
         OnStatus(Stream.CurrentStatus);
+        Api.RoleChanged += OnRoleChanged;
+        _result = await Api.GetRecoveryProgressAsync();
+        // The stream replays history on subscribe; the debounce turns that
+        // replay into at most one extra refresh.
         _subId = Stream.Subscribe(OnStreamEvent);
     }
 
@@ -172,72 +139,56 @@
         });
     }
 
+    private void OnRoleChanged() => QueueRefresh();
+
     private void OnStreamEvent(StreamEvent ev)
     {
-        InvokeAsync(() =>
+        if (ev is AuditStreamEvent)
         {
-            if (ev is not AuditStreamEvent a) return;
-            var entry = a.Entry;
-            if (string.IsNullOrEmpty(entry.EventId) || entry.Amount is not > 0) return;
+            QueueRefresh();
+        }
+    }
 
-            _eventStates[entry.EventId] = new EventState(entry.State ?? "detected", entry.Amount.Value);
-            Recompute();
+    private void QueueRefresh()
+    {
+        if (Interlocked.Exchange(ref _refreshQueued, 1) == 1)
+        {
+            return;
+        }
+        _ = InvokeAsync(async () =>
+        {
+            await Task.Delay(RefreshDebounce);
+            Interlocked.Exchange(ref _refreshQueued, 0);
+            if (_disposed)
+            {
+                return;
+            }
+            var fresh = await Api.GetRecoveryProgressAsync();
+            // Keep showing the last good numbers through a transient failure.
+            if (fresh.Ok || _result is not { Ok: true })
+            {
+                _result = fresh;
+            }
             StateHasChanged();
         });
     }
 
-    private void Recompute()
+    private static string Width(ProgressBucketDto bucket, RecoveryProgressDto p) =>
+        (p.TotalAtRiskRupees > 0 ? bucket.Rupees / p.TotalAtRiskRupees * 100 : 0)
+            .ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + "%";
+
+    private static string Share(ProgressBucketDto bucket, RecoveryProgressDto p) =>
+        Fmt.Pct(p.TotalAtRiskRupees > 0 ? bucket.Rupees / p.TotalAtRiskRupees : 0);
+
+    public ValueTask DisposeAsync()
     {
-        TotalEvents = _eventStates.Count;
-        TotalAtRisk = 0;
-        Recovered = 0; RecoveredCount = 0;
-        Escalated = 0; EscalatedCount = 0;
-        Suppressed = 0; SuppressedCount = 0;
-        Abandoned = 0; AbandonedCount = 0;
-        InFlight = 0; InFlightCount = 0;
-        DetectedCount = 0; RetryScheduledCount = 0; RetryingCount = 0;
-        ContactScheduledCount = 0; ContactingCount = 0; WaitingOnPtpCount = 0;
-
-        foreach (var (_, es) in _eventStates)
-        {
-            TotalAtRisk += es.Amount;
-            switch (es.State)
-            {
-                case "recovered":
-                    Recovered += es.Amount; RecoveredCount++; break;
-                case "escalated":
-                    Escalated += es.Amount; EscalatedCount++; break;
-                case "suppressed":
-                    Suppressed += es.Amount; SuppressedCount++; break;
-                case "abandoned":
-                    Abandoned += es.Amount; AbandonedCount++; break;
-                default:
-                    InFlight += es.Amount; InFlightCount++;
-                    switch (es.State)
-                    {
-                        case "detected" or "diagnosed": DetectedCount++; break;
-                        case "retry_scheduled": RetryScheduledCount++; break;
-                        case "retrying": RetryingCount++; break;
-                        case "contact_scheduled": ContactScheduledCount++; break;
-                        case "contacting": ContactingCount++; break;
-                        case "waiting_on_ptp": WaitingOnPtpCount++; break;
-                    }
-                    break;
-            }
-        }
-    }
-
-    private double Pct(long amount) => TotalAtRisk > 0 ? (double)amount / TotalAtRisk * 100 : 0;
-    private string PctString(long amount) => Pct(amount).ToString("F1");
-    private static string FormatRupees(long paise) => "₹" + (paise / 100.0).ToString("N0");
-
-    public async ValueTask DisposeAsync()
-    {
+        _disposed = true;
         Stream.StatusChanged -= OnStatus;
+        Api.RoleChanged -= OnRoleChanged;
         if (_subId >= 0)
         {
             Stream.Unsubscribe(_subId);
         }
-        await Task.CompletedTask;
+        return ValueTask.CompletedTask;
     }
 }

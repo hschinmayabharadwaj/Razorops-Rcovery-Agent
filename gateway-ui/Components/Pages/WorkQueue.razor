@@ -1,0 +1,149 @@
+@page "/queue"
+@using GatewayUI.Models
+@using GatewayUI.Services
+@using GatewayUI.Components.Shared
+@inject IGatewayApi Api
+@implements IDisposable
+
+<PageTitle>Work Queue</PageTitle>
+
+<div class="py-3">
+    <div class="d-flex align-items-center justify-content-between mb-1">
+        <h3 class="mb-0">Recovery work queue</h3>
+        <button class="btn btn-outline-secondary btn-sm" @onclick="LoadAsync">Refresh</button>
+    </div>
+    <p class="text-secondary small mb-3">
+        Ranked by expected recoverable value (calibrated recovery probability &times; amount). Named compliance rules
+        decide eligibility first; the model only orders what the rules allow.
+    </p>
+
+    <ViewState T="WorkQueueDto" Result="_result" Loading="@_loading">
+        @if (_result!.Data is { } q)
+        {
+            <div class="row g-3 mb-3">
+                <div class="col-md-3">
+                    <div class="card h-100 shadow-sm"><div class="card-body">
+                        <div class="text-muted small">Expected recoverable</div>
+                        <div class="fs-4 fw-semibold">@Fmt.Rupees(q.ExpectedRupees)</div>
+                        <div class="small text-secondary">of @Fmt.Rupees(q.OpenAtRiskRupees) open and eligible</div>
+                    </div></div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card h-100 shadow-sm"><div class="card-body">
+                        <div class="text-muted small">Eligible for automated work</div>
+                        <div class="fs-4 fw-semibold text-success">@q.EligibleCount</div>
+                        <div class="small text-secondary">@q.BlockedCount blocked by rules or already recovered</div>
+                    </div></div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card h-100 shadow-sm"><div class="card-body">
+                        <div class="text-muted small mb-2">Who can fix the failure</div>
+                        <div class="d-flex flex-wrap gap-2">
+                            @foreach (var (cls, count) in (q.FailureClassCounts ?? new()).OrderByDescending(kv => kv.Value))
+                            {
+                                <span class="badge @Fmt.FailureClassBadge(cls) fs-6">@Fmt.Words(cls): @count</span>
+                            }
+                        </div>
+                        <div class="small text-secondary mt-2">
+                            Model trained on @q.ModelTrainedOn historical events (base recovery rate @Fmt.Pct(q.ModelBaseRate)).
+                        </div>
+                    </div></div>
+                </div>
+            </div>
+
+            <div class="card shadow-sm">
+                <div class="table-responsive" style="max-height: 68vh; overflow-y: auto;">
+                    <table class="table table-sm table-hover align-middle mb-0" id="work-queue">
+                        <thead class="table-light sticky-top">
+                            <tr>
+                                <th>#</th><th>Event</th><th>Flow</th><th>Failure class</th>
+                                <th class="text-end">Amount</th><th class="text-end">P(recover)</th>
+                                <th class="text-end">Expected</th><th>Risk</th><th>Next best action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var item in q.Items ?? new())
+                            {
+                                var eligible = item.Eligibility?.Eligible == true;
+                                <tr class="queue-row @(eligible ? "" : "table-secondary text-secondary")" style="cursor:pointer"
+                                    @onclick="() => ToggleAsync(item.EventId)">
+                                    <td>@item.Rank</td>
+                                    <td><code>@item.EventId</code></td>
+                                    <td>@Fmt.Words(item.Flow)</td>
+                                    <td><span class="badge @Fmt.FailureClassBadge(item.FailureClass)">@Fmt.Words(item.FailureClass)</span></td>
+                                    <td class="text-end">@Fmt.Rupees(item.AmountRupees)</td>
+                                    <td class="text-end fw-semibold">@Fmt.Pct(item.Probability, 0)</td>
+                                    <td class="text-end">@(eligible ? Fmt.Rupees(item.ExpectedRupees) : "—")</td>
+                                    <td><span class="badge @Fmt.RiskBadge(item.RiskTier)">@item.RiskScore</span></td>
+                                    <td class="small">@item.Recommendation</td>
+                                </tr>
+                                @if (_expanded == item.EventId)
+                                {
+                                    <tr class="queue-detail">
+                                        <td colspan="9" class="bg-light">
+                                            <ProfilePanel Profile="@_profile" Error="@_profileError" />
+                                        </td>
+                                    </tr>
+                                }
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+    </ViewState>
+</div>
+
+@code {
+    private ApiResult<WorkQueueDto>? _result;
+    private bool _loading;
+    private string? _expanded;
+    private SignalProfileDto? _profile;
+    private string? _profileError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Api.RoleChanged += OnRoleChanged;
+        await LoadAsync();
+    }
+
+    private void OnRoleChanged() => InvokeAsync(LoadAsync);
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _result = null;
+        _expanded = null;
+        StateHasChanged();
+        _result = await Api.GetWorkQueueAsync();
+        _loading = false;
+        StateHasChanged();
+    }
+
+    private async Task ToggleAsync(string? eventId)
+    {
+        if (eventId is null || _expanded == eventId)
+        {
+            _expanded = null;
+            return;
+        }
+        _expanded = eventId;
+        _profile = null;
+        _profileError = null;
+        var result = await Api.GetSignalProfileAsync(eventId);
+        if (_expanded != eventId)
+        {
+            return;
+        }
+        if (result.Ok)
+        {
+            _profile = result.Data;
+        }
+        else
+        {
+            _profileError = result.AuthDenied ? "Insufficient permissions for the signal profile." : result.Error;
+        }
+    }
+
+    public void Dispose() => Api.RoleChanged -= OnRoleChanged;
+}

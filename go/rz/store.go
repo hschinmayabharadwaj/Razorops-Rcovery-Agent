@@ -22,6 +22,17 @@ type AuditStore struct {
 	f        string
 	claimed  map[string]bool
 	hydrated bool
+	// Cached chain tail, so Append does not re-read the whole log every time.
+	// tailSize is the file size the cache was taken at: if the file changed
+	// size behind our back, the cache is discarded and the tail re-read.
+	tailHash  string
+	tailSize  int64
+	tailKnown bool
+	// quiet stores never broadcast to the live stream: scratch runs (sandbox
+	// scenarios, policy comparison, model training) are not live activity.
+	quiet bool
+	// memory, when non-nil, replaces the file: the log lives only in memory.
+	memory *[]AuditEntry
 }
 
 // NewAuditStore creates (or opens) the JSONL audit log at logFile.
@@ -36,22 +47,41 @@ func NewAuditStore(logFile string) (*AuditStore, error) {
 	return &AuditStore{f: logFile}, nil
 }
 
+// NewScratchAuditStore opens a file-backed store whose appends are never
+// broadcast on the live stream.
+func NewScratchAuditStore(logFile string) (*AuditStore, error) {
+	s, err := NewAuditStore(logFile)
+	if err != nil {
+		return nil, err
+	}
+	s.quiet = true
+	return s, nil
+}
+
+// NewMemoryAuditStore returns a quiet, hash-chained store that never touches
+// disk. Used for model training, where the log is an intermediate artifact.
+func NewMemoryAuditStore() *AuditStore {
+	entries := []AuditEntry{}
+	return &AuditStore{quiet: true, memory: &entries}
+}
+
 func (s *AuditStore) Path() string { return s.f }
 
 // Append hashes and writes one entry.
 func (s *AuditStore) Append(e AuditEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	prevHash, err := readLastHash(s.f)
+	prevHash, err := s.tailLocked()
 	if err != nil {
 		return err
-	}
-	if prevHash == "" {
-		prevHash = GenesisHash
 	}
 	entry := e
 	entry.PrevHash = prevHash
 	entry.Hash = ComputeHash(prevHash, &e)
+	if s.memory != nil {
+		*s.memory = append(*s.memory, entry)
+		return nil
+	}
 	line, err := json.Marshal(entry)
 	if err != nil {
 		return err
@@ -62,16 +92,65 @@ func (s *AuditStore) Append(e AuditEntry) error {
 	}
 	defer f.Close()
 	_, err = f.Write(append(line, '\n'))
-	if err == nil && BroadcastHub != nil {
+	if err != nil {
+		s.tailKnown = false
+		return err
+	}
+	s.tailHash = entry.Hash
+	s.tailSize = fileSize(s.f)
+	s.tailKnown = s.tailSize >= 0
+	if BroadcastHub != nil && !s.quiet {
 		BroadcastHub.Broadcast(entry)
 	}
-	return err
+	return nil
+}
+
+// tailLocked returns the hash to chain the next entry to, using the cached
+// tail when the file is exactly as this store last wrote it.
+func (s *AuditStore) tailLocked() (string, error) {
+	if s.memory != nil {
+		if n := len(*s.memory); n > 0 {
+			return (*s.memory)[n-1].Hash, nil
+		}
+		return GenesisHash, nil
+	}
+	if s.tailKnown && fileSize(s.f) == s.tailSize {
+		return s.tailHash, nil
+	}
+	last, err := readLastHash(s.f)
+	if err != nil {
+		return "", err
+	}
+	if last == "" {
+		last = GenesisHash
+	}
+	return last, nil
+}
+
+// fileSize returns the size of a file, 0 when it does not exist, and -1 when
+// it cannot be inspected.
+func fileSize(name string) int64 {
+	info, err := os.Stat(name)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		return -1
+	}
+	return info.Size()
 }
 
 // All returns every stored entry in order.
 func (s *AuditStore) All() ([]AuditEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.readLocked()
+}
+
+func (s *AuditStore) readLocked() ([]AuditEntry, error) {
+	if s.memory != nil {
+		return append([]AuditEntry(nil), *s.memory...), nil
+	}
 	return readAllEntries(s.f)
 }
 
@@ -102,7 +181,7 @@ func (s *AuditStore) hydrateLocked() error {
 	if s.claimed == nil {
 		s.claimed = map[string]bool{}
 	}
-	entries, err := readAllEntries(s.f)
+	entries, err := s.readLocked()
 	if err != nil {
 		return err
 	}
@@ -117,12 +196,14 @@ func (s *AuditStore) hydrateLocked() error {
 func (s *AuditStore) Clear() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	err := os.Remove(s.f)
-	if err != nil && !os.IsNotExist(err) {
+	if s.memory != nil {
+		*s.memory = (*s.memory)[:0]
+	} else if err := os.Remove(s.f); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	s.claimed = nil
 	s.hydrated = false
+	s.tailKnown = false
 	return nil
 }
 

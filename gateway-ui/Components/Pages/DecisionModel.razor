@@ -1,0 +1,189 @@
+@page "/model"
+@using GatewayUI.Models
+@using GatewayUI.Services
+@using GatewayUI.Components.Shared
+@inject IGatewayApi Api
+@implements IDisposable
+
+<PageTitle>Decision Model</PageTitle>
+
+<div class="py-3">
+    <div class="d-flex align-items-center justify-content-between mb-1">
+        <h3 class="mb-0">Decision model</h3>
+        <button class="btn btn-outline-secondary btn-sm" @onclick="LoadAsync">Refresh</button>
+    </div>
+    <p class="text-secondary small mb-3">
+        One shared signal profile feeds every decision head. Evaluated out-of-time against the incumbent named-factor
+        risk score on the same test set: calibration and ranking are reported separately, per flow, and at fixed alert volumes.
+    </p>
+
+    <ViewState T="ModelCardDto" Result="_result" Loading="@_loading">
+        @if (_result!.Data is { } m && m.Learned is { } learned && m.Incumbent is { } incumbent)
+        {
+            <div class="row g-3 mb-3">
+                <div class="col-lg-5">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-header fw-semibold">Model card</div>
+                        <div class="card-body small">
+                            <dl class="row mb-0">
+                                <dt class="col-5">Heads</dt>
+                                <dd class="col-7">@string.Join(", ", (m.Heads ?? new()).Select(Fmt.Words))</dd>
+                                <dt class="col-5">Shared profile</dt>
+                                <dd class="col-7">@string.Join(", ", (m.SharedProfile ?? new()).Select(Fmt.Words))</dd>
+                                <dt class="col-5">Estimator</dt>
+                                <dd class="col-7">smoothed rates, backoff @string.Join(" → ", m.BackoffLevels ?? new()) (m = @m.Smoothing)</dd>
+                                <dt class="col-5">Training history</dt>
+                                <dd class="col-7">@m.HistoryEvents events (seed @m.HistorySeed), base rate @Fmt.Pct(m.BaseRate)</dd>
+                                <dt class="col-5">Never used as input</dt>
+                                <dd class="col-7">
+                                    PII: @string.Join(", ", m.ExcludedPii ?? new())<br />
+                                    outcome (leakage): @string.Join(", ", m.ExcludedOutcome ?? new())
+                                </dd>
+                            </dl>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-7">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-header fw-semibold">
+                            Out-of-time test: trained on @m.TrainCount events before @Day(m.SplitAt), tested on @m.TestCount after
+                        </div>
+                        <div class="card-body">
+                            <table class="table table-sm mb-2" id="head-comparison">
+                                <thead class="table-light">
+                                    <tr><th>Head</th><th class="text-end">Brier ↓</th><th class="text-end">Log loss ↓</th><th class="text-end">AUC ↑</th><th class="text-end">Calibration error ↓</th></tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var head in new[] { learned, incumbent })
+                                    {
+                                        <tr>
+                                            <td>@Fmt.Words(head.Name)</td>
+                                            <td class="text-end">@Fmt.Number(head.Brier)</td>
+                                            <td class="text-end">@Fmt.Number(head.LogLoss)</td>
+                                            <td class="text-end">@Fmt.Number(head.Auc)</td>
+                                            <td class="text-end">@Fmt.Number(head.Ece)</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                            <div class="small text-secondary">Test-set recovery rate @Fmt.Pct(m.TestBaseRate).</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row g-3 mb-3">
+                <div class="col-lg-7">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-header fw-semibold">Calibration: predicted vs observed recovery (learned head)</div>
+                        <div class="card-body">
+                            <div class="calibration-chart" role="img" aria-label="Calibration chart: predicted versus observed recovery rate per probability bin">
+                                @foreach (var bin in learned.Bins ?? new())
+                                {
+                                    <div class="calibration-col" title="@BinTitle(bin)">
+                                        <div class="calibration-bars">
+                                            <div class="calibration-bar predicted" style="height:@Height(bin.MeanPredicted, bin.Count)"></div>
+                                            <div class="calibration-bar observed" style="height:@Height(bin.ObservedRate, bin.Count)"></div>
+                                        </div>
+                                        <div class="calibration-label">@((bin.Lower * 100).ToString("0"))–@((bin.Upper * 100).ToString("0"))</div>
+                                        <div class="calibration-count">n=@bin.Count</div>
+                                    </div>
+                                }
+                            </div>
+                            <div class="small text-secondary mt-2">
+                                <span class="legend-swatch predicted"></span> mean predicted
+                                <span class="legend-swatch observed ms-3"></span> observed rate.
+                                Bars of equal height mean the probabilities can be taken at face value.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-5">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-header fw-semibold">At a fixed alert volume</div>
+                        <div class="card-body">
+                            <p class="small text-secondary">
+                                Each head flags the same share of events as least likely to recover. Precision = flagged events that truly were not recovered.
+                            </p>
+                            <table class="table table-sm mb-0">
+                                <thead class="table-light"><tr><th>Flagged</th><th class="text-end">Learned</th><th class="text-end">Incumbent</th></tr></thead>
+                                <tbody>
+                                    @foreach (var point in m.AlertVolumes ?? new())
+                                    {
+                                        <tr>
+                                            <td>@Fmt.Pct(point.Volume, 0) (@point.Flagged)</td>
+                                            <td class="text-end fw-semibold">@Fmt.Pct(point.LearnedPrecision)</td>
+                                            <td class="text-end">@Fmt.Pct(point.IncumbentPrecision)</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card shadow-sm">
+                <div class="card-header fw-semibold">Per-flow slices (so one average cannot hide a regression)</div>
+                <div class="table-responsive">
+                    <table class="table table-sm table-striped mb-0" id="flow-slices">
+                        <thead class="table-light">
+                            <tr><th>Flow</th><th class="text-end">Test events</th><th class="text-end">Observed</th><th class="text-end">Predicted</th><th class="text-end">Brier</th><th class="text-end">AUC learned</th><th class="text-end">AUC incumbent</th></tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var slice in learned.Slices ?? new())
+                            {
+                                var old = incumbent.Slices?.FirstOrDefault(s => s.Slice == slice.Slice);
+                                <tr>
+                                    <td>@Fmt.Words(slice.Slice)</td>
+                                    <td class="text-end">@slice.Count</td>
+                                    <td class="text-end">@Fmt.Pct(slice.BaseRate)</td>
+                                    <td class="text-end">@Fmt.Pct(slice.MeanPredicted)</td>
+                                    <td class="text-end">@Fmt.Number(slice.Brier)</td>
+                                    <td class="text-end fw-semibold">@Fmt.Number(slice.Auc, "0.00")</td>
+                                    <td class="text-end">@(old is null ? "—" : Fmt.Number(old.Auc, "0.00"))</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+    </ViewState>
+</div>
+
+@code {
+    private ApiResult<ModelCardDto>? _result;
+    private bool _loading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Api.RoleChanged += OnRoleChanged;
+        await LoadAsync();
+    }
+
+    private void OnRoleChanged() => InvokeAsync(LoadAsync);
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _result = null;
+        StateHasChanged();
+        _result = await Api.GetModelCardAsync();
+        _loading = false;
+        StateHasChanged();
+    }
+
+    private static string Day(string? iso) =>
+        DateTimeOffset.TryParse(iso, out var at) ? at.ToString("dd MMM yyyy") : "—";
+
+    private static string Height(double rate, int count) =>
+        count == 0 ? "0%" : (Math.Max(rate, 0.01) * 100).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + "%";
+
+    private static string BinTitle(CalibrationBinDto bin) =>
+        bin.Count == 0
+            ? "no test events in this bin"
+            : $"{bin.Count} events: predicted {Fmt.Pct(bin.MeanPredicted)}, observed {Fmt.Pct(bin.ObservedRate)}";
+
+    public void Dispose() => Api.RoleChanged -= OnRoleChanged;
+}

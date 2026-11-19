@@ -111,6 +111,73 @@ public sealed class GatewayApiServiceTests
     }
 
     [Fact]
+    public async Task GetWorkQueue_ReadsRankedItemsAndEligibility()
+    {
+        var http = new StubHttpHandler(_ => StubHttpHandler.Json(HttpStatusCode.OK, """
+            {"items":[
+              {"rank":1,"eventId":"evt_a","flow":"failed_subscription","failureClass":"customer_side","amountRupees":1000,
+               "probability":0.8,"expectedRupees":800,"riskTier":"low","eligibility":{"eligible":true,"state":"retrying"},
+               "recommendation":"remind the customer, then retry",
+               "explanationPath":[{"level":"flow","key":"failed_subscription","observations":40,"observedRate":0.6,"estimate":0.61}]},
+              {"rank":2,"eventId":"evt_b","flow":"mandate_retry","failureClass":"blocked","amountRupees":500,
+               "probability":0.0,"expectedRupees":0,"eligibility":{"eligible":false,"reason":"locked compliance rule","blockingRule":"mandate_revoked_escalate","state":"escalated"}}
+            ],"eligibleCount":1,"blockedCount":1,"expectedRupees":800,"failureClassCounts":{"customer_side":1,"blocked":1}}
+            """));
+        var api = NewApi(http);
+
+        var result = await api.GetWorkQueueAsync();
+
+        Assert.True(result.Ok);
+        var items = result.Data!.Items!;
+        Assert.Equal(["evt_a", "evt_b"], items.Select(i => i.EventId));
+        Assert.True(items[0].Eligibility!.Eligible);
+        Assert.Equal("mandate_revoked_escalate", items[1].Eligibility!.BlockingRule);
+        Assert.Equal(0.61, Assert.Single(items[0].ExplanationPath!).Estimate);
+        Assert.Equal("/intelligence/queue", Assert.Single(http.Requests).Uri.AbsolutePath);
+    }
+
+    [Fact]
+    public async Task GetSignalProfile_EscapesTheEventId()
+    {
+        var http = new StubHttpHandler(_ => StubHttpHandler.Json(HttpStatusCode.OK, """{"eventId":"a b&c","probability":0.4}"""));
+        var api = NewApi(http);
+
+        var result = await api.GetSignalProfileAsync("a b&c");
+
+        Assert.Equal(0.4, result.Data!.Probability);
+        var request = Assert.Single(http.Requests);
+        Assert.Equal("/intelligence/profile", request.Uri.AbsolutePath);
+        Assert.Equal("?eventId=a%20b%26c", request.Uri.Query);
+    }
+
+    [Fact]
+    public async Task GetRecoveryProgress_ReturnsEmptyBucketsForMissingOutcomes()
+    {
+        var http = new StubHttpHandler(_ => StubHttpHandler.Json(HttpStatusCode.OK,
+            """{"totalEvents":2,"totalAtRiskRupees":300,"outcomes":{"recovered":{"count":1,"rupees":100}},"inFlightStates":{}}"""));
+        var api = NewApi(http);
+
+        var result = await api.GetRecoveryProgressAsync();
+
+        Assert.Equal(new GatewayUI.Models.ProgressBucketDto(1, 100), result.Data!.Bucket("recovered"));
+        Assert.Equal(new GatewayUI.Models.ProgressBucketDto(0, 0), result.Data.Bucket("escalated"));
+    }
+
+    [Theory]
+    [InlineData("model", "/intelligence/model")]
+    [InlineData("health", "/intelligence/health")]
+    public async Task DecisionLayerCalls_HitTheirGoRoutes(string call, string path)
+    {
+        var http = new StubHttpHandler(_ => StubHttpHandler.Json(HttpStatusCode.OK, "{}"));
+        var api = NewApi(http);
+
+        var ok = call == "model" ? (await api.GetModelCardAsync()).Ok : (await api.GetHealthAsync()).Ok;
+
+        Assert.True(ok);
+        Assert.Equal(path, Assert.Single(http.Requests).Uri.AbsolutePath);
+    }
+
+    [Fact]
     public async Task PostAdminAction_ReturnsTheRefusalFromTheBackend()
     {
         var http = new StubHttpHandler(_ => StubHttpHandler.Json(HttpStatusCode.OK,
